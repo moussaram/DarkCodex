@@ -367,7 +367,7 @@ def local_answer(prompt: str) -> str:
             "",
             "Your request was saved. Local mode can manage memory, run commands,",
             "scan files, and prepare context. For real AI answers, configure:",
-            "  export DARKCODEX_API_KEY='YOUR_API_KEY'",
+            "  darkcodex config api-key YOUR_GEMINI_API_KEY",
             "  darkcodex config provider darkcodex",
             "  darkcodex config provider codex",
             "",

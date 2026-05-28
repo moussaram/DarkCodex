@@ -84,9 +84,8 @@ def verify_license(license_key: str, timeout: int = 20) -> tuple[bool, str]:
         "limit": "1",
     }
     url = f"{base_url}?{urllib.parse.urlencode(params)}"
-    request = urllib.request.Request(url, headers=supabase_headers(), method="GET")
-
     try:
+        request = urllib.request.Request(url, headers=supabase_headers(), method="GET")
         with urllib.request.urlopen(request, timeout=timeout) as response:
             rows = json.loads(response.read().decode("utf-8"))
     except RuntimeError:

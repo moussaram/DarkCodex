@@ -3,6 +3,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -11,7 +12,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import licence
+from . import agent_fichiers, langues, licence, memory, security
+
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except OSError:
+            pass
 
 APP_NAME = "DarkCodex"
 HOME = Path.home()
@@ -243,7 +251,7 @@ def config_timeout(config: dict, default: int = 1200) -> int:
 
 def darkcodex_api_answer(prompt: str, config: dict) -> tuple[int, str]:
     api_key_env = str(config.get("api_key_env") or "DARKCODEX_API_KEY")
-    api_key = os.environ.get(api_key_env) or os.environ.get("GEMINI_API_KEY")
+    api_key = security.get_api_key() or os.environ.get(api_key_env) or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         api_key_file = Path(str(config.get("api_key_file") or STATE_DIR / "api_key"))
         try:
@@ -387,6 +395,7 @@ def print_rows(rows: list[sqlite3.Row]) -> None:
 
 def cmd_ask(args: argparse.Namespace) -> int:
     config = load_config()
+    langues.ensure_language()
     store = Store()
     cwd = Path(args.cwd).resolve()
     provider = detect_provider(config) if not args.provider or args.provider == "auto" else args.provider
@@ -406,6 +415,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     store.add_message(session_id, "user", request)
     code, output = run_provider(provider, prompt, config, cwd)
     store.add_message(session_id, "assistant", output)
+    memory.remember_conversation(request, output)
     print(output)
     return code
 
@@ -441,8 +451,86 @@ def type_writer(text: str, prefix: str = "", delay: float = 0.005) -> None:
         sys.stdout.write("\n")
         sys.stdout.flush()
 
+
+def handle_file_agent_command(line: str, cwd: Path, provider: str, config: dict) -> bool:
+    commands = ("/lire ", "/corriger ", "/expliquer ", "/generer ", "/resume ")
+    if not any(line.startswith(command) for command in commands):
+        return False
+
+    def call_ai(prompt: str) -> tuple[int, str]:
+        allowed, limit_message = licence.consume_request()
+        if not allowed:
+            return 1, limit_message
+        return run_provider(provider, prompt, config, cwd)
+
+    if line.startswith("/resume "):
+        folder = agent_fichiers.resolve_path(cwd, line.removeprefix("/resume ").strip())
+        ok, prompt = agent_fichiers.summary_prompt(folder)
+        if not ok:
+            print(prompt)
+            return True
+        code, output = call_ai(prompt)
+        print(output)
+        if code == 0:
+            memory.remember_conversation(line, output)
+        return True
+
+    if line.startswith("/generer "):
+        try:
+            parts = shlex.split(line, posix=False)
+        except ValueError as exc:
+            print(f"Commande invalide: {exc}")
+            return True
+        if len(parts) < 3:
+            print('Usage: /generer [fichier] "[description]"')
+            return True
+        path = agent_fichiers.resolve_path(cwd, parts[1])
+        description = " ".join(parts[2:]).strip('"')
+        code, output = call_ai(agent_fichiers.generate_prompt(path, description))
+        if code == 0:
+            agent_fichiers.write_generated_file(path, output)
+            print(f"Fichier généré: {path}")
+            memory.remember_conversation(line, f"Fichier généré: {path}")
+        else:
+            print(output)
+        return True
+
+    command, value = line.split(" ", 1)
+    path = agent_fichiers.resolve_path(cwd, value)
+    ok, content_or_error = agent_fichiers.read_text_file(path)
+    if not ok:
+        print(content_or_error)
+        return True
+
+    mode = command.removeprefix("/")
+    prompt = agent_fichiers.analysis_prompt(path, content_or_error, mode)
+    code, output = call_ai(prompt)
+    if mode == "corriger" and code == 0:
+        backup = agent_fichiers.backup_file(path)
+        agent_fichiers.write_generated_file(path, output)
+        print(f"Fichier corrigé: {path}")
+        print(f"Sauvegarde créée: {backup}")
+        memory.remember_conversation(line, f"Fichier corrigé: {path}")
+        return True
+
+    print(output)
+    if code == 0:
+        memory.remember_conversation(line, output)
+    return True
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     config = load_config()
+    if not langues.has_active_language() and sys.stdin.isatty():
+        print(langues.tr("preferred_language"))
+        print(langues.list_languages())
+        choice = input("> ").strip()
+        ok, message = langues.set_active_language(choice)
+        if not ok:
+            langues.ensure_language()
+            print(message)
+    else:
+        langues.ensure_language()
     store = Store()
     cwd = Path(args.cwd).resolve()
     provider = detect_provider(config) if not args.provider or args.provider == "auto" else args.provider
@@ -451,6 +539,8 @@ def cmd_chat(args: argparse.Namespace) -> int:
     # Clear screen and show header
     print("\033[H\033[J", end="")
     print(BANNER)
+    print(memory.startup_message())
+    print(langues.format_startup())
     print(f" {C_BOLD}STATUS:{C_END} {C_GREEN}ONLINE{C_END} | {C_BOLD}ENGINE:{C_END} {C_MAGENTA}{provider.upper()}{C_END} | {C_BOLD}PATH:{C_END} {C_CYAN}{cwd}{C_END}")
     print(f" {C_BOLD}MODE:{C_END} {C_GREEN}{licence.status_text(refresh=True)}{C_END}")
     print(f" {C_YELLOW}Commands: /help, /run, /activate, /status, /clear, /exit{C_END}")
@@ -472,6 +562,17 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if line == "/help":
             print(f"\n{C_BOLD}{C_YELLOW}--- DarkCodex Commands ---{C_END}")
             print(f"  {C_CYAN}/memory KEY VAL{C_END} : Store knowledge")
+            print(f"  {C_CYAN}/memoire{C_END}        : Affiche la mémoire persistante")
+            print(f"  {C_CYAN}/oublier{C_END}        : Efface la mémoire persistante")
+            print(f"  {C_CYAN}/contexte TEXTE{C_END} : Définit le contexte du projet")
+            print(f"  {C_CYAN}/lire FICHIER{C_END}   : Lit et analyse un fichier")
+            print(f"  {C_CYAN}/corriger FICHIER{C_END}: Corrige un fichier avec sauvegarde")
+            print(f"  {C_CYAN}/expliquer FICHIER{C_END}: Explique un fichier")
+            print(f"  {C_CYAN}/generer FICHIER \"DESC\"{C_END}: Génère un fichier")
+            print(f"  {C_CYAN}/resume DOSSIER{C_END} : Résume un dossier")
+            print(f"  {C_CYAN}/langue CODE{C_END}    : Change la langue active")
+            print(f"  {C_CYAN}/langues{C_END}        : Liste les langues disponibles")
+            print(f"  {C_CYAN}/traduire TEXTE{C_END} : Traduit vers la langue active")
             print(f"  {C_CYAN}/run CMD{C_END}        : Execute shell")
             print(f"  {C_CYAN}/activate{C_END}       : Activate Pro license")
             print(f"  {C_CYAN}/status{C_END}         : Show Free/Pro status")
@@ -482,6 +583,35 @@ def cmd_chat(args: argparse.Namespace) -> int:
             continue
         if line == "/status":
             print(f"\n{C_GREEN}{licence.status_text(refresh=True)}{C_END}\n")
+            continue
+        if line == "/memoire":
+            print(memory.memory_summary())
+            continue
+        if line == "/oublier":
+            memory.clear_memory()
+            langues.ensure_language()
+            print("Mémoire effacée.")
+            continue
+        if line.startswith("/contexte "):
+            memory.set_project_context(line.removeprefix("/contexte ").strip())
+            print("Contexte projet enregistré.")
+            continue
+        if line == "/langues":
+            print(langues.list_languages())
+            continue
+        if line.startswith("/langue "):
+            ok, message = langues.set_active_language(line.removeprefix("/langue ").strip())
+            color = C_GREEN if ok else C_RED
+            print(f"{color}{message}{C_END}")
+            continue
+        if line.startswith("/traduire "):
+            text = line.removeprefix("/traduire ").strip()
+            code, output = run_provider(provider, langues.translate_prompt(text, langues.get_active_language()), config, cwd)
+            print(output)
+            if code == 0:
+                memory.remember_conversation(line, output)
+            continue
+        if handle_file_agent_command(line, cwd, provider, config):
             continue
         if line == "/activate":
             license_key = input(f"{C_BOLD}{C_MAGENTA}Clé Pro: {C_END}").strip()
@@ -517,6 +647,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
         print(" " * 40, end="\r") # Clear loader
         
         store.add_message(session_id, "assistant", output)
+        memory.remember_conversation(line, output)
         
         # Display AI Response with a clear border/separator and animation
         print(f"{C_BOLD}{C_CYAN}┌─[ DarkCodex Response ]{C_END}")

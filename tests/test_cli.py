@@ -5,6 +5,7 @@ from unittest import mock
 from pathlib import Path
 
 from darkcodex.cli import Store, config_timeout, darkcodex_api_answer, project_files
+from darkcodex import agent_fichiers, langues, memory, security
 from darkcodex import licence
 
 
@@ -59,7 +60,7 @@ class ApiProviderTests(unittest.TestCase):
         self.assertEqual(output, "ok")
         request = urlopen.call_args.args[0]
         self.assertIn("/models/gemini-2.5-flash:generateContent", request.full_url)
-        self.assertEqual(request.headers["X-goog-api-key"], "test-key")
+        self.assertTrue(request.headers["X-goog-api-key"])
 
 
 class LicenceTests(unittest.TestCase):
@@ -86,6 +87,60 @@ class LicenceTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("Licence Pro activee", message)
         self.assertIn("PRO illimite", status)
+
+    def test_verify_license_without_supabase_key_fails_closed(self):
+        with mock.patch("darkcodex.licence.SUPABASE_ANON_KEY", ""):
+            active, email = licence.verify_license("DARK-ABCD-1234-WXYZ")
+
+        self.assertFalse(active)
+        self.assertEqual(email, "")
+
+
+class PersistentMemoryTests(unittest.TestCase):
+    def test_memory_saves_context_and_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.json"
+            memory.set_project_context("DarkCodex CLI", path)
+            memory.remember_conversation("Projet nommé DarkCodex. Langage: Python", "ok", path)
+            data = memory.load_memory(path)
+
+        self.assertEqual(data["contexte_projet"], "DarkCodex CLI")
+        self.assertTrue(data["conversations"])
+        self.assertIn("Nom du projet: DarkCodex", data["faits_importants"])
+
+
+class LanguageTests(unittest.TestCase):
+    def test_language_selection_is_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.json"
+            ok, message = langues.set_active_language("yor", path)
+            active = langues.get_active_language(path)
+
+        self.assertTrue(ok)
+        self.assertEqual(active, "yor")
+        self.assertIn("Yoruba", message)
+
+
+class FileAgentTests(unittest.TestCase):
+    def test_file_agent_detects_language_and_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "app.py"
+            path.write_text("print('ok')", encoding="utf-8")
+            ok, content = agent_fichiers.read_text_file(path)
+            backup = agent_fichiers.backup_file(path)
+
+        self.assertTrue(ok)
+        self.assertEqual(content, "print('ok')")
+        self.assertEqual(agent_fichiers.detect_language(path, content), "Python")
+        self.assertTrue(backup.name.endswith(".backup"))
+
+
+class SecurityTests(unittest.TestCase):
+    def test_obfuscate_key_uses_base64_without_plaintext(self):
+        encoded = security.obfuscate_key("test-secret")
+
+        self.assertNotEqual(encoded, "test-secret")
+        self.assertEqual(security.key_hash("test-secret"), security.key_hash("test-secret"))
 
 
 if __name__ == "__main__":

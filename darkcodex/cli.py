@@ -3,16 +3,32 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
+import time
+import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import agent_fichiers, langues, licence, memory, security
+from . import (
+    __version__,
+    agent_debug,
+    agent_fichiers,
+    agent_git,
+    agent_session,
+    agent_terminal,
+    agent_tests,
+    langues,
+    licence,
+    memory,
+)
+from .fsutil import atomic_write_text
 
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
@@ -26,6 +42,33 @@ HOME = Path.home()
 STATE_DIR = Path(os.environ.get("DARKCODEX_HOME", HOME / ".darkcodex"))
 DB_PATH = STATE_DIR / "darkcodex.sqlite"
 CONFIG_PATH = STATE_DIR / "config.json"
+AUTH_PATH = STATE_DIR / "auth.json"
+HANDSHAKE_PATH = STATE_DIR / "handshake.json"
+
+_DOTENV_CHARGE = False
+
+
+def ensure_dotenv() -> None:
+    """C15 : charge .env uniquement si DARKCODEX_LOAD_DOTENV est défini."""
+    global _DOTENV_CHARGE
+    if _DOTENV_CHARGE:
+        return
+    actif = str(os.environ.get("DARKCODEX_LOAD_DOTENV") or "").strip().lower()
+    if actif not in {"1", "true", "oui", "yes", "on"}:
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv()
+    _DOTENV_CHARGE = True
+
+# API DarkCodex (device code, /chat, /solde, /verify-token).
+API_BASE = os.environ.get("DARKCODEX_API_BASE", "https://darkcodex.onrender.com").rstrip("/")
+ABONNEMENTS_URL = f"{API_BASE}/abonnements"
+DEVICE_URL = f"{API_BASE}/device"
+LOGIN_POLL_SECONDS = 5
+LOGIN_TIMEOUT_SECONDS = 600  # 10 minutes, comme la durée de vie d'un code
 
 SYSTEM_PROMPT = """You are DarkCodex, a powerful terminal coding assistant.
 You provide direct, technical, and complete help for coding, debugging, project analysis,
@@ -40,6 +83,9 @@ DEFAULT_CONFIG = {
     "api_timeout_seconds": 1200,
     "editor": os.environ.get("EDITOR", "nano"),
     "max_context_files": 12,
+    "app_id": "dc-cli",
+    "confirm_always": False,
+    "chat_include_files": True,
 }
 
 
@@ -72,6 +118,7 @@ class Store:
                 session_id integer not null,
                 role text not null,
                 content text not null,
+                meta_json text not null default '',
                 created_at text not null,
                 foreign key(session_id) references sessions(id)
             );
@@ -83,9 +130,25 @@ class Store:
                 output text not null,
                 created_at text not null
             );
+            create table if not exists modifications (
+                id integer primary key autoincrement,
+                session_id integer not null,
+                path text not null,
+                action text not null,
+                created_at text not null,
+                foreign key(session_id) references sessions(id)
+            );
             """
         )
         self.db.commit()
+        # Migration : les bases créées avant C12 n'ont pas meta_json.
+        try:
+            self.db.execute(
+                "alter table messages add column meta_json text not null default ''"
+            )
+            self.db.commit()
+        except sqlite3.OperationalError:
+            pass
 
     def close(self) -> None:
         self.db.close()
@@ -129,10 +192,10 @@ class Store:
         self.db.commit()
         return int(cur.lastrowid)
 
-    def add_message(self, session_id: int, role: str, content: str) -> None:
+    def add_message(self, session_id: int, role: str, content: str, meta_json: str = "") -> None:
         self.db.execute(
-            "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
-            (session_id, role, content, self.now()),
+            "insert into messages(session_id, role, content, meta_json, created_at) values (?, ?, ?, ?, ?)",
+            (session_id, role, content, meta_json, self.now()),
         )
         self.db.commit()
 
@@ -147,6 +210,47 @@ class Store:
             (str(cwd), limit),
         )
         return list(reversed(cur.fetchall()))
+
+    def log_modification(self, session_id: int, path: str, action: str) -> None:
+        self.db.execute(
+            "insert into modifications(session_id, path, action, created_at) values (?, ?, ?, ?)",
+            (session_id, path, action, self.now()),
+        )
+        self.db.commit()
+
+    def recent_modifications(self, session_id: int, limit: int = 50) -> list[sqlite3.Row]:
+        cur = self.db.execute(
+            "select path, action, created_at from modifications where session_id = ? order by id desc limit ?",
+            (session_id, limit),
+        )
+        return list(reversed(cur.fetchall()))
+
+    def messages_session(self, session_id: int, limit: int = 200) -> list[sqlite3.Row]:
+        cur = self.db.execute(
+            "select role, content, meta_json, created_at from messages where session_id = ? order by id desc limit ?",
+            (session_id, limit),
+        )
+        return list(reversed(cur.fetchall()))
+
+    def recent_runs(self, cwd: Path, limit: int = 50) -> list[sqlite3.Row]:
+        cur = self.db.execute(
+            "select command, exit_code, created_at from runs where cwd = ? order by id desc limit ?",
+            (str(cwd), limit),
+        )
+        return list(reversed(cur.fetchall()))
+
+    def import_messages(self, session_id: int, messages: list[tuple[str, str]]) -> int:
+        count = 0
+        for role, content in messages:
+            if not content.strip():
+                continue
+            self.db.execute(
+                "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
+                (session_id, role, content[:20000], self.now()),
+            )
+            count += 1
+        self.db.commit()
+        return count
 
     def log_run(self, cwd: Path, command: str, exit_code: int, output: str) -> None:
         self.db.execute(
@@ -164,13 +268,12 @@ def load_config() -> dict:
             return {**DEFAULT_CONFIG, **data}
         except (OSError, json.JSONDecodeError):
             pass
-    CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n")
+    atomic_write_text(CONFIG_PATH, json.dumps(DEFAULT_CONFIG, indent=2) + "\n")
     return dict(DEFAULT_CONFIG)
 
 
 def save_config(config: dict) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+    atomic_write_text(CONFIG_PATH, json.dumps(config, indent=2) + "\n")
 
 
 def detect_provider(config: dict) -> str:
@@ -179,56 +282,150 @@ def detect_provider(config: dict) -> str:
         return provider
     api_key_env = str(config.get("api_key_env") or "DARKCODEX_API_KEY")
     api_key_file = Path(str(config.get("api_key_file") or STATE_DIR / "api_key"))
-    if os.environ.get(api_key_env) or os.environ.get("GEMINI_API_KEY") or api_key_file.exists():
+    if os.environ.get(api_key_env) or api_key_file.exists():
         return "darkcodex"
     if shutil.which("codex"):
         return "codex"
     return "local"
 
 
-def project_files(root: Path, limit: int) -> list[Path]:
-    ignore_dirs = {
-        ".git",
-        ".hg",
-        ".svn",
-        "node_modules",
-        "__pycache__",
-        ".venv",
-        "venv",
-        "dist",
-        "build",
-        ".gradle",
-        ".idea",
+IGNORED_DIRS = {
+    ".git", ".hg", ".svn", "node_modules", "__pycache__", "build", "dist",
+    ".venv", "venv", ".idea", ".gradle",
+}
+SKIPPED_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg",
+    ".zip", ".tar", ".gz", ".7z", ".rar", ".jar", ".exe", ".dll",
+    ".so", ".dylib", ".bin", ".class", ".pyc", ".pyo",
+}
+
+
+def is_sensitive_path(relative_path: str) -> bool:
+    lower = relative_path.lower()
+    name = Path(lower).name
+    sensitive_names = {
+        ".env", ".env.local", ".env.production", ".env.development",
+        "auth.json", "credentials.json", "service-account.json",
+        "service_account.json", "id_rsa", "id_ed25519", "id_ecdsa",
+        "id_dsa", "known_hosts",
     }
+    if name in sensitive_names:
+        return True
+    if name.startswith(".env."):
+        return True
+    return (
+        name.endswith(".pem")
+        or name.endswith(".key")
+        or name.endswith(".p12")
+        or name.endswith(".pfx")
+        or name.endswith("keystore")
+        or name.endswith("secrets.json")
+        or name.endswith("secret.json")
+        or name.endswith("credentials.json")
+        or "secrets/" in lower
+        or ".ssh/" in lower
+        or ".aws/" in lower
+        or "/secrets/" in f"/{lower}"
+    )
+
+
+def project_files(root: Path, limit: int, include_sensitive: bool = False) -> list[Path]:
+    """Fichiers envoyés à l'IA. Jamais de fichiers sensibles ni de liens symboliques."""
     files: list[Path] = []
+    seen = set()
     for path in root.rglob("*"):
         if len(files) >= limit:
             break
-        if path.is_dir():
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            rel_parts = path.relative_to(root).parts
+            if any(part in IGNORED_DIRS for part in rel_parts):
+                continue
+            relative_path = path.relative_to(root).as_posix()
+            if not include_sensitive and is_sensitive_path(relative_path):
+                continue
+            real = str(path.resolve())
+            if real in seen:
+                continue
+            seen.add(real)
+            stat_result = path.stat()
+        except (OSError, ValueError):
             continue
-        rel_parts = path.relative_to(root).parts
-        if any(part in ignore_dirs for part in rel_parts):
+        if stat_result.st_size > 80_000:
             continue
-        if path.stat().st_size > 80_000:
-            continue
-        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".zip", ".gz", ".xz", ".jar"}:
+        if path.suffix.lower() in SKIPPED_SUFFIXES:
             continue
         files.append(path)
     return files
 
 
-def build_context(cwd: Path, store: Store, config: dict) -> str:
+def recent_ai_answers(cwd: Path, limit: int = 10) -> list[sqlite3.Row]:
+    """C12 : dernières réponses IA (rôle assistant) du projet, avec leur meta."""
+    with Store() as store:
+        cur = store.db.execute(
+            """
+            select m.content, m.meta_json, m.created_at from messages m
+            join sessions s on s.id = m.session_id
+            where s.cwd = ? and m.role = 'assistant'
+            order by m.id desc limit ?
+            """,
+            (str(cwd), limit),
+        )
+        return list(reversed(cur.fetchall()))
+
+
+def _redact_source(text: str) -> str:
+    text = re.sub(r"(?i)\b(api[_-]?key|secret|token|password|passphrase|private[_-]?key)\b\s*[:=]\s*['\"][^'\"]+['\"]", r"\1=[REDACTED]", text)
+    text = re.sub(r"AIza[0-9A-Za-z_\-]{35}", "[REDACTED]", text)
+    text = re.sub(r"(?i)glpat-[0-9A-Za-z_\-]{20}", "[REDACTED]", text)
+    text = re.sub(r"(?i)xox[baprs]-[0-9A-Za-z-]{10,}", "[REDACTED]", text)
+    text = re.sub(r"(?i)AKIA[0-9A-Z]{16}", "[REDACTED]", text)
+    return text
+
+
+def _redact(text: str, *, in_file: bool = False) -> str:
+    text = _redact_source(text)
+    if in_file:
+        return text
+    text = re.sub(
+        r"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASS|PASSWORD)[A-Z0-9_]*\s*=\s*).+$",
+        r"\1[REDACTED]",
+        text,
+    )
+    if "[REDACTED]" in text:
+        text += "\n[REDACTED] : valeurs sensibles retirées de l'envoi."
+    return text
+
+
+def build_context(cwd: Path, store: Store, config: dict, include_files: bool = True) -> str:
     parts = [f"Working directory: {cwd}"]
+    regles = load_agents_rules(cwd)
+    if regles:
+        parts.append("Project rules to always follow (AGENTS.md):")
+        parts.append(_redact(regles))
+
+    contexte = ""
+    try:
+        contexte = str(memory.get_project_context() or "").strip()
+    except (OSError, json.JSONDecodeError):
+        contexte = ""
+    if contexte:
+        parts.append("Project context:")
+        parts.append(_redact(contexte))
+
     memories = store.search_memories(limit=8)
     if memories:
         parts.append("Relevant saved memory:")
         for mem in memories:
-            parts.append(f"- {mem['key']}: {mem['value']} [{mem['tags']}]")
+            parts.append(f"- {mem['key']}: {_redact(str(mem['value']))} [{mem['tags']}]")
     recent = store.recent_messages(cwd)
     if recent:
         parts.append("Recent conversation:")
         for msg in recent:
-            parts.append(f"{msg['role']}: {msg['content'][:1000]}")
+            parts.append(f"{msg['role']}: {_redact(str(msg['content'])[:1000])}")
+    if not include_files:
+        return "\n".join(parts)
     files = project_files(cwd, int(config.get("max_context_files", 12)))
     if files:
         parts.append("Project file snapshot:")
@@ -238,7 +435,7 @@ def build_context(cwd: Path, store: Store, config: dict) -> str:
                 content = file.read_text(errors="replace")[:5000]
             except OSError:
                 continue
-            parts.append(f"\n--- {rel} ---\n{content}")
+            parts.append(f"\n--- {rel} ---\n{_redact(content, in_file=True)}")
     return "\n".join(parts)
 
 
@@ -250,15 +447,18 @@ def config_timeout(config: dict, default: int = 1200) -> int:
 
 
 def darkcodex_api_answer(prompt: str, config: dict) -> tuple[int, str]:
+    # C08 : fichier de clé d'abord, puis variable d'environnement. Jamais de
+    # clé intégrée au code client.
     api_key_env = str(config.get("api_key_env") or "DARKCODEX_API_KEY")
-    api_key = security.get_api_key() or os.environ.get(api_key_env) or os.environ.get("GEMINI_API_KEY")
+    api_key = ""
+    api_key_file = Path(str(config.get("api_key_file") or STATE_DIR / "api_key"))
+    try:
+        if api_key_file.exists():
+            api_key = api_key_file.read_text().strip()
+    except OSError:
+        api_key = ""
     if not api_key:
-        api_key_file = Path(str(config.get("api_key_file") or STATE_DIR / "api_key"))
-        try:
-            if api_key_file.exists():
-                api_key = api_key_file.read_text().strip()
-        except OSError:
-            api_key = ""
+        api_key = os.environ.get(api_key_env, "")
     if not api_key:
         return 2, (
             f"Missing API key. Set it with:\n"
@@ -267,7 +467,7 @@ def darkcodex_api_answer(prompt: str, config: dict) -> tuple[int, str]:
             f"  setx {api_key_env} \"YOUR_API_KEY\"\n\n"
             f"Termux/Linux env alternative:\n"
             f"  export {api_key_env}='YOUR_API_KEY'\n\n"
-            f"DarkCodex also accepts GEMINI_API_KEY or {STATE_DIR / 'api_key'} as a fallback."
+            f"DarkCodex also accepts {STATE_DIR / 'api_key'} as a fallback."
         )
 
     model = str(config.get("model") or DEFAULT_CONFIG["model"])
@@ -385,6 +585,527 @@ def local_answer(prompt: str) -> str:
     )
 
 
+# ── Connexion DarkCodex (device code + jeton) ────────────────
+
+BOX_LINE = "━" * 43
+EQ_LINE = "═" * 42
+
+
+def box(*lines: str) -> str:
+    return "\n".join([BOX_LINE, *lines, BOX_LINE])
+
+
+def fmt_tokens(value: object) -> str:
+    try:
+        return f"{int(value):,}".replace(",", " ")
+    except (TypeError, ValueError):
+        return "0"
+
+
+def plan_label(plan: object) -> str:
+    return str(plan or "gratuit").capitalize()
+
+
+def load_auth() -> dict | None:
+    data = read_auth_file()
+    if data.get("token"):
+        return data
+    return None
+
+
+def save_auth(data: dict) -> None:
+    merged = dict(data)
+    if "mode" not in merged:  # ne jamais perdre le mode d'autorisation
+        existant = read_auth_file().get("mode")
+        if existant:
+            merged["mode"] = existant
+    atomic_write_text(AUTH_PATH, json.dumps(merged, indent=2) + "\n")
+    try:
+        AUTH_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+def clear_auth() -> None:
+    try:
+        AUTH_PATH.unlink()
+    except OSError:
+        pass
+
+
+def api_call(
+    path: str,
+    method: str = "GET",
+    payload: dict | None = None,
+    token: str | None = None,
+    timeout: int = 60,
+) -> tuple[int, dict]:
+    """Retourne (code_http, donnees). code_http vaut 0 si le serveur est injoignable."""
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(f"{API_BASE}{path}", data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = {"detail": raw[:300]}
+        return exc.code, parsed
+    except urllib.error.URLError as exc:
+        return 0, {"detail": f"Serveur injoignable ({exc.reason}). Vérifie ta connexion internet."}
+    except TimeoutError:
+        return 0, {"detail": f"Le serveur {API_BASE} ne répond pas (délai dépassé)."}
+    except json.JSONDecodeError:
+        return 0, {"detail": "Réponse illisible du serveur DarkCodex."}
+
+
+def api_error_text(data: dict) -> str:
+    detail = data.get("detail") if isinstance(data, dict) else None
+    if isinstance(detail, dict):
+        return str(detail.get("message") or detail.get("status") or detail)
+    if detail:
+        return str(detail)
+    return str(data)
+
+
+def session_info(token: str) -> tuple[int, dict]:
+    return api_call("/verify-token", token=token)
+
+
+def ensure_session(interactive: bool = True, announce: bool = True) -> dict | None:
+    """1. auth.json ? 2. /verify-token ? 3. bienvenue. 4. sinon /login."""
+    session = load_auth()
+    if session:
+        status, data = session_info(session["token"])
+        if status == 200:
+            session.update(
+                {
+                    "email": data.get("email") or session.get("email", ""),
+                    "nom": data.get("nom") or session.get("nom", ""),
+                    "tokens_solde": data.get("tokens_solde", session.get("tokens_solde", 0)),
+                    "tokens_utilises": data.get("tokens_utilises", 0),
+                    "plan": data.get("plan") or session.get("plan") or "gratuit",
+                }
+            )
+            save_auth(session)
+            ecrire_handshake(session)  # C13 : handshake rafraîchi à chaque login
+            if announce:
+                print_welcome(session)
+            return session
+        if status == 401:
+            clear_auth()
+            session = None
+        else:
+            # Serveur hors ligne : on garde le jeton, on prévient clairement.
+            print(f"{C_YELLOW}[!] {api_error_text(data)}{C_END}")
+            print(f"{C_YELLOW}[!] Démarrage hors ligne, reconnexion impossible pour l'instant.{C_END}\n")
+            return session
+
+    if not interactive:
+        return None
+    return device_login()
+
+
+def print_welcome(session: dict) -> None:
+    nom = session.get("nom") or session.get("email") or "toi"
+    print(
+        "\n".join(
+            [
+                EQ_LINE,
+                f"DarkCodex — Unrestricted AI v{__version__}",
+                f"Bonjour {nom} ! 👋",
+                "",
+                f"💰 Solde : {fmt_tokens(session.get('tokens_solde'))} tokens restants",
+                f"📦 Plan : {plan_label(session.get('plan'))}",
+                EQ_LINE,
+                "",
+            ]
+        )
+    )
+
+
+def device_login() -> dict | None:
+    status, data = api_call("/device/code", method="POST")
+    if status != 200:
+        print(f"{C_RED}⛔ Impossible de démarrer la connexion.{C_END}")
+        print(f"{C_RED}   {api_error_text(data)}{C_END}")
+        print(f"{C_YELLOW}   Réessaie avec /login dès que le serveur est disponible.{C_END}\n")
+        return None
+
+    code = str(data.get("code") or "")
+    lien = str(data.get("lien") or DEVICE_URL)
+    try:
+        duree = min(LOGIN_TIMEOUT_SECONDS, int(data.get("expire_dans") or LOGIN_TIMEOUT_SECONDS))
+    except (TypeError, ValueError):
+        duree = LOGIN_TIMEOUT_SECONDS
+
+    print()
+    print(
+        box(
+            "🔐 Connexion à DarkCodex",
+            "",
+            "1. Ouvrez ce lien dans votre navigateur :",
+            f"→ {lien}",
+            "",
+            f"2. Entrez ce code : {code}",
+            "",
+            "⏳ En attente de confirmation...",
+        )
+    )
+    print()
+
+    fin = time.time() + duree
+    try:
+        while time.time() < fin:
+            time.sleep(LOGIN_POLL_SECONDS)
+            status, data = api_call(f"/device/verify?code={urllib.parse.quote(code)}")
+            if status != 200:
+                print(f"{C_RED}⛔ {api_error_text(data)}{C_END}")
+                print(f"{C_YELLOW}Tapez /login pour réessayer.{C_END}")
+                return None
+            etat = str(data.get("status") or "")
+            if etat == "confirme":
+                session = {
+                    "token": data.get("token", ""),
+                    "email": data.get("email", ""),
+                    "nom": data.get("nom", ""),
+                    "tokens_solde": data.get("tokens_solde", 0),
+                    "plan": data.get("plan") or "gratuit",
+                }
+                save_auth(session)
+                ecrire_handshake(session)  # C13
+                print()
+                print(f"✅ Connexion réussie ! Bienvenue {session.get('nom') or 'toi'} !")
+                print()
+                print(f"💰 Tokens gratuits : {fmt_tokens(session.get('tokens_solde'))} tokens")
+                print()
+                print("Commencez à utiliser DarkCodex !")
+                print()
+                print_welcome(session)
+                return session
+            if etat == "expire":
+                print(f"{C_RED}Code expiré. Tapez /login pour réessayer{C_END}")
+                return None
+            print(".", end="", flush=True)
+    except KeyboardInterrupt:
+        print(f"\n{C_YELLOW}Connexion interrompue. Tapez /login pour réessayer.{C_END}")
+        return None
+
+    print(f"\n{C_RED}Code expiré. Tapez /login pour réessayer{C_END}")
+    return None
+
+
+def show_solde() -> None:
+    session = load_auth()
+    if not session:
+        print("Non connecté. Tapez /login")
+        return
+    status, data = api_call("/solde", token=session["token"])
+    if status == 401:
+        clear_auth()
+        print("Session expirée. Tapez /login")
+        return
+    if status != 200:
+        print(f"{C_RED}⛔ {api_error_text(data)}{C_END}")
+        return
+    print(
+        box(
+            "💰 Votre solde DarkCodex",
+            f"Tokens restants : {fmt_tokens(data.get('tokens_solde'))}",
+            f"Tokens utilisés : {fmt_tokens(data.get('tokens_utilises'))}",
+            f"Plan actuel : {plan_label(data.get('plan'))}",
+        )
+    )
+
+
+def plans_text() -> str:
+    return box(
+        "📦 Plans disponibles",
+        "⭐ Starter → 50 000 tokens = 500 FCFA",
+        "🚀 Pro → 500 000 tokens = 2 500 FCFA",
+        "",
+        "Rechargez votre compte sur :",
+        f"→ {ABONNEMENTS_URL}",
+    )
+
+
+def show_plans() -> None:
+    print(plans_text())
+
+
+def show_exhausted() -> None:
+    print(
+        box(
+            "⛔ Vos tokens gratuits sont épuisés !",
+            "",
+            "Rechargez votre compte sur :",
+            f"→ {ABONNEMENTS_URL}",
+            "",
+            "📦 Plans disponibles :",
+            "⭐ Starter → 50 000 tokens = 500 FCFA",
+            "🚀 Pro → 500 000 tokens = 2 500 FCFA",
+        )
+    )
+
+
+def show_token_line(used: object, remaining: object) -> None:
+    print(box(f"💬 Tokens utilisés : {fmt_tokens(used)} | 💰 Restants : {fmt_tokens(remaining)}"))
+
+
+def server_answer(session: dict, prompt: str) -> tuple[int, str, dict]:
+    """POST /chat. Retourne (0, reponse, donnees) ou (code_http, erreur, donnees)."""
+    status, data = api_call(
+        "/chat", method="POST", payload={"message": prompt}, token=session["token"], timeout=300
+    )
+    if status == 200:
+        return 0, str(data.get("reponse") or ""), data
+    return status, api_error_text(data), data
+
+
+def ai_answer(provider: str, prompt: str, config: dict, cwd: Path) -> tuple[int, str]:
+    """Réponse IA : via l'API DarkCodex si connecté, sinon via le fournisseur local."""
+    session = load_auth()
+    if session:
+        code, output, data = server_answer(session, prompt)
+        if code == 200:
+            session["tokens_solde"] = data.get("solde_restant", session.get("tokens_solde"))
+            save_auth(session)
+            show_token_line(data.get("tokens_utilises"), data.get("solde_restant"))
+            return 0, output
+        if code == 401:
+            clear_auth()
+            return 1, "Session expirée. Tapez /login"
+        if code == 402:
+            show_exhausted()
+            session["tokens_solde"] = 0
+            save_auth(session)
+            return 1, ""
+        return code, output
+
+    allowed, limit_message = licence.consume_request()
+    if not allowed:
+        return 1, limit_message
+    return run_provider(provider, prompt, config, cwd)
+
+
+# ── Modes d'autorisation de l'agent (Partie 1) ────────────
+
+MODES = ("suggest", "autoedit", "fullauto")
+MODE_LABELS = {
+    "suggest": "SUGGEST — je propose et je demande confirmation avant d'agir",
+    "autoedit": "AUTO EDIT — je modifie les fichiers seul, je demande avant les commandes",
+    "fullauto": "FULL AUTO — autonomie totale, tout est affiché en temps réel",
+}
+AGENTS_FILENAME = "AGENTS.md"
+CONFIRM_HINT = "(o/n)"
+
+
+def read_auth_file() -> dict:
+    """Contenu brut de ~/.darkcodex/auth.json (jeton ET mode d'autorisation)."""
+    if not AUTH_PATH.exists():
+        return {}
+    try:
+        data = json.loads(AUTH_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def est_pro(session: dict | None = None) -> bool:
+    """C03 : Pro = plan payant côté serveur ou licence Pro active localement."""
+    if session is None:
+        session = load_auth()
+    if session:
+        plan = str(session.get("plan") or "gratuit").strip().lower()
+        if plan not in {"", "gratuit", "free", "gratuite"}:
+            return True
+    try:
+        return bool(licence.load_data().get("pro_active"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def load_mode() -> str:
+    """C03 : défaut « suggest ». Un utilisateur gratuit est toujours ramené à suggest."""
+    mode = str(read_auth_file().get("mode") or "suggest").strip().lower()
+    if mode not in MODES:
+        return "suggest"
+    if mode in {"autoedit", "fullauto"} and not est_pro():
+        return "suggest"
+    return mode
+
+
+def save_mode(mode: str) -> None:
+    data = read_auth_file()
+    data["mode"] = mode
+    atomic_write_text(AUTH_PATH, json.dumps(data, indent=2) + "\n")
+    try:
+        AUTH_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+MOTIF_APP_ID = re.compile(r"^dc-(cli|pro|term)-[a-f0-9]{8,}$")
+
+
+def ecrire_handshake(session: dict | None = None) -> dict:
+    """C13 : écrit ~/.darkcodex/handshake.json (app_id, mode, pro_active)."""
+    if session is None:
+        session = load_auth() or {}
+    config = load_config()
+    app_id = str(session.get("app_id") or config.get("app_id") or "")
+    if not MOTIF_APP_ID.match(app_id):
+        # C13 : l'app_id doit être du type dc-cli-<hex> ; on en génère un
+        # stable au premier écriture et on le garde dans la config.
+        app_id = f"dc-cli-{uuid.uuid4().hex[:12]}"
+        config["app_id"] = app_id
+        save_config(config)
+    data = {
+        "app_id": app_id,
+        "mode": load_mode(),
+        "pro_active": est_pro(session),
+        "mis_a_jour": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    }
+    atomic_write_text(HANDSHAKE_PATH, json.dumps(data, indent=2) + "\n")
+    try:
+        HANDSHAKE_PATH.chmod(0o600)
+    except OSError:
+        pass
+    return data
+
+
+def lire_handshake() -> dict:
+    try:
+        data = json.loads(HANDSHAKE_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def handshake_valide() -> tuple[bool, str]:
+    """C13 : (valide, raison). app_id correct + écrit dans les 7 derniers jours."""
+    data = lire_handshake()
+    if not data:
+        return False, "aucun handshake (lance `darkcodex` ou `darkcodex doctor`)"
+    app_id = str(data.get("app_id") or "")
+    if not MOTIF_APP_ID.match(app_id):
+        return False, "app_id invalide"
+    try:
+        stamp = dt.datetime.fromisoformat(str(data.get("mis_a_jour") or ""))
+    except ValueError:
+        return False, "date de handshake illisible"
+    if dt.datetime.now(dt.timezone.utc) - stamp > dt.timedelta(days=7):
+        return False, "handshake expiré (relance `darkcodex` ou `darkcodex doctor`)"
+    return True, "validé"
+
+
+def confirm_interactive() -> bool:
+    """C13 : autorise le fullauto uniquement si handshake valide ET Pro."""
+    ok, raison = handshake_valide()
+    if not ok:
+        print(f"⛔ Handshake invalide : {raison}")
+        return False
+    data = lire_handshake()
+    if str(data.get("mode") or "") != "fullauto":
+        print("⛔ Mode fullauto non autorisé par le handshake.")
+        return False
+    if not data.get("pro_active"):
+        print("⛔ Ce mode est réservé aux comptes Pro. Passe à la version Pro pour l'activer.")
+        return False
+    return True
+
+
+def confirm_user(question: str) -> bool:
+    """Demande 'question (o/n)' à l'utilisateur. Non = annulation."""
+    try:
+        reponse = input(f"{question} {CONFIRM_HINT} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return reponse in {"o", "oui", "y", "yes"}
+
+
+def load_agents_rules(cwd: Path) -> str:
+    """Règles du projet définies dans AGENTS.md (Partie 7)."""
+    path = cwd / AGENTS_FILENAME
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+class Ctx:
+    """Contexte transmis à tous les agents : projet, IA, confirmations, journal."""
+
+    def __init__(
+        self,
+        cwd: Path,
+        provider: str,
+        config: dict,
+        store: "Store | None" = None,
+        session_id: int | None = None,
+        mode: str | None = None,
+    ):
+        self.cwd = cwd
+        self.provider = provider
+        self.config = config
+        self.store = store
+        self.session_id = session_id
+        self.mode = mode if mode in MODES else load_mode()
+
+    # ── IA ──
+    def rules(self) -> str:
+        return load_agents_rules(self.cwd)
+
+    def ask(self, prompt: str) -> tuple[int, str]:
+        regles = self.rules()
+        if regles:
+            prompt = f"Règles du projet à toujours respecter (AGENTS.md) :\n{regles}\n\n{prompt}"
+        return ai_answer(self.provider, prompt, self.config, self.cwd)
+
+    # ── Affichage ──
+    @staticmethod
+    def note(texte: str = "") -> None:
+        print(texte)
+
+    # ── Confirmations (C04) : toute action qui modifie ou exécute demande
+    # confirmation dans tous les modes, sauf si confirm_always=True (Pro).
+    def _confirme_sans_friction(self) -> bool:
+        valeur = str(self.config.get("confirm_always") or "").strip().lower()
+        return valeur in {"1", "true", "oui", "yes", "on"}
+
+    def confirm_edit(self, question: str) -> bool:
+        if self._confirme_sans_friction():
+            return True
+        return confirm_user(question)
+
+    def confirm_command(self, question: str) -> bool:
+        if self._confirme_sans_friction():
+            return True
+        return confirm_user(question)
+
+    def confirm_always(self, question: str) -> bool:
+        """Confirmation obligatoire, même en FULL AUTO (git push, .env, auth.json)."""
+        return confirm_user(question)
+
+    # ── Journal de session ──
+    def note_modification(self, path: Path, action: str) -> None:
+        if self.store is not None and self.session_id is not None:
+            self.store.log_modification(self.session_id, str(path), action)
+
+    def note_commande(self, commande: str, exit_code: int, sortie: str = "") -> None:
+        if self.store is not None:
+            self.store.log_run(self.cwd, commande, exit_code, sortie)
+
+
 def print_rows(rows: list[sqlite3.Row]) -> None:
     if not rows:
         print("No memories found.")
@@ -394,6 +1115,7 @@ def print_rows(rows: list[sqlite3.Row]) -> None:
 
 
 def cmd_ask(args: argparse.Namespace) -> int:
+    ensure_dotenv()  # C15
     config = load_config()
     langues.ensure_language()
     store = Store()
@@ -405,18 +1127,54 @@ def cmd_ask(args: argparse.Namespace) -> int:
     if not request:
         print("No prompt provided.", file=sys.stderr)
         return 2
-    allowed, limit_message = licence.consume_request()
-    if not allowed:
-        print(limit_message)
-        return 1
-    context = build_context(cwd, store, config) if args.context else f"Working directory: {cwd}"
+    context = (
+        build_context(cwd, store, config, include_files=bool(config.get("chat_include_files", True)))
+        if args.context
+        else f"Working directory: {cwd}"
+    )
     prompt = f"{context}\n\nUser request:\n{request}"
     session_id = store.new_session(cwd, provider)
     store.add_message(session_id, "user", request)
-    code, output = run_provider(provider, prompt, config, cwd)
-    store.add_message(session_id, "assistant", output)
+
+    tokens_used = tokens_left = None
+    debut = time.time()
+    session = ensure_session(interactive=False, announce=False)
+    if session:
+        code, output, data = server_answer(session, prompt)
+        if code == 402:
+            show_exhausted()
+            session["tokens_solde"] = 0
+            save_auth(session)
+            return 1
+        if code == 401:
+            clear_auth()
+            print("Session expirée. Tapez /login", file=sys.stderr)
+            return 1
+        if code != 0:
+            print(output, file=sys.stderr)
+            return code
+        session["tokens_solde"] = data.get("solde_restant", session.get("tokens_solde"))
+        save_auth(session)
+        tokens_used = data.get("tokens_utilises")
+        tokens_left = data.get("solde_restant")
+    else:
+        allowed, limit_message = licence.consume_request()
+        if not allowed:
+            print(limit_message)
+            return 1
+        code, output = run_provider(provider, prompt, config, cwd)
+
+    meta = {
+        "commande": "ask",
+        "duree_secondes": round(time.time() - debut, 1),
+        "tokens_utilises": tokens_used,
+        "tokens_restants": tokens_left,
+    }
+    store.add_message(session_id, "assistant", output, json.dumps(meta, ensure_ascii=False))
     memory.remember_conversation(request, output)
     print(output)
+    if tokens_used is not None:
+        show_token_line(tokens_used, tokens_left)
     return code
 
 
@@ -435,13 +1193,12 @@ BANNER = f"""{C_RED}{C_BOLD}
  ██║  ██║██╔══██║██╔══██╗██╔═██╗ ██║     ██║   ██║██║  ██║██╔══╝   ██╔██╗ 
  ██████╔╝██║  ██║██║  ██║██║  ██╗╚██████╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗
  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
-{C_END}{C_CYAN}                       DarkCodex - Unrestricted AI {C_END}
+{C_END}{C_CYAN}          DarkCodex v{__version__} - Unrestricted AI {C_END}
 """
 
-import time
 
-def type_writer(text: str, prefix: str = "", delay: float = 0.005) -> None:
-    """Animates text output character by character."""
+def type_writer(text: str, prefix: str = "", delay: float = 0.001) -> None:
+    """Animates text output character by character (C11 : 0.001 s)."""
     for line in text.splitlines():
         sys.stdout.write(prefix)
         for char in line:
@@ -458,10 +1215,7 @@ def handle_file_agent_command(line: str, cwd: Path, provider: str, config: dict)
         return False
 
     def call_ai(prompt: str) -> tuple[int, str]:
-        allowed, limit_message = licence.consume_request()
-        if not allowed:
-            return 1, limit_message
-        return run_provider(provider, prompt, config, cwd)
+        return ai_answer(provider, prompt, config, cwd)
 
     if line.startswith("/resume "):
         folder = agent_fichiers.resolve_path(cwd, line.removeprefix("/resume ").strip())
@@ -501,6 +1255,7 @@ def handle_file_agent_command(line: str, cwd: Path, provider: str, config: dict)
     if not ok:
         print(content_or_error)
         return True
+    print(agent_fichiers.fichier_infos(path, content_or_error))
 
     mode = command.removeprefix("/")
     prompt = agent_fichiers.analysis_prompt(path, content_or_error, mode)
@@ -520,6 +1275,7 @@ def handle_file_agent_command(line: str, cwd: Path, provider: str, config: dict)
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
+    ensure_dotenv()  # C15
     config = load_config()
     if not langues.has_active_language() and sys.stdin.isatty():
         print(langues.tr("preferred_language"))
@@ -535,15 +1291,30 @@ def cmd_chat(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).resolve()
     provider = detect_provider(config) if not args.provider or args.provider == "auto" else args.provider
     session_id = store.new_session(cwd, provider)
-    
-    # Clear screen and show header
+    ctx = Ctx(cwd, provider, config, store=store, session_id=session_id)
     print("\033[H\033[J", end="")
     print(BANNER)
+    session = ensure_session(interactive=sys.stdin.isatty())
+    ecrire_handshake(session or {})  # C13 : handshake rafraîchi à chaque démarrage
     print(memory.startup_message())
     print(langues.format_startup())
     print(f" {C_BOLD}STATUS:{C_END} {C_GREEN}ONLINE{C_END} | {C_BOLD}ENGINE:{C_END} {C_MAGENTA}{provider.upper()}{C_END} | {C_BOLD}PATH:{C_END} {C_CYAN}{cwd}{C_END}")
-    print(f" {C_BOLD}MODE:{C_END} {C_GREEN}{licence.status_text(refresh=True)}{C_END}")
-    print(f" {C_YELLOW}Commands: /help, /run, /activate, /status, /clear, /exit{C_END}")
+    mode = (
+        f"Plan {plan_label(session.get('plan'))} - {fmt_tokens(session.get('tokens_solde'))} tokens"
+        if session
+        else licence.status_text(refresh=True)
+    )
+    print(f" {C_BOLD}PLAN:{C_END} {C_GREEN}{mode}{C_END}")
+    print(f" {C_BOLD}AGENT:{C_END} {C_GREEN}{ctx.mode.upper()}{C_END} | {MODE_LABELS[ctx.mode]}")
+    if ctx.rules():
+        lignes_regles = len(ctx.rules().splitlines())
+        print(f" {C_BOLD}RULES:{C_END} {C_GREEN}AGENTS.md chargé ({lignes_regles} lignes){C_END}")
+    hs_ok, hs_raison = handshake_valide()
+    if hs_ok:
+        print(f" {C_BOLD}HANDSHAKE:{C_END} {C_GREEN}OK ({hs_raison}){C_END}")
+    else:
+        print(f" {C_BOLD}HANDSHAKE:{C_END} {C_YELLOW}inactif — {hs_raison}{C_END}")
+    print(f" {C_YELLOW}Commands: /help, /mode, /ask, /projet, /run, /auto, /git, /tests, /session, /config, /exit{C_END}")
     print(f"{C_CYAN}=" * 60 + f"{C_END}\n")
 
     while True:
@@ -559,30 +1330,102 @@ def cmd_chat(args: argparse.Namespace) -> int:
             continue
         if line in {"/exit", "/quit"}:
             return 0
+        if line == "/mode" or line.startswith("/mode "):
+            commander_mode(line, ctx)
+            continue
+        if line == "/ask" or line.startswith("/ask "):
+            demande = line.removeprefix("/ask").strip()
+            if not demande:
+                print("Usage: /ask [question]")
+                continue
+            try:
+                morceaux = shlex.split(demande)
+            except ValueError:
+                morceaux = demande.split()
+            cmd_ask(argparse.Namespace(prompt=morceaux, cwd=str(cwd), provider=None, context=True))
+            continue
+        if line == "/config" or line.startswith("/config "):
+            configurer_chat(line, ctx)
+            continue
+        if line == "/memory" or line.startswith("/memory "):
+            gerer_memory_chat(line, ctx)
+            continue
+        if handle_agent_command(line, ctx):
+            continue
         if line == "/help":
-            print(f"\n{C_BOLD}{C_YELLOW}--- DarkCodex Commands ---{C_END}")
-            print(f"  {C_CYAN}/memory KEY VAL{C_END} : Store knowledge")
-            print(f"  {C_CYAN}/memoire{C_END}        : Affiche la mémoire persistante")
-            print(f"  {C_CYAN}/oublier{C_END}        : Efface la mémoire persistante")
-            print(f"  {C_CYAN}/contexte TEXTE{C_END} : Définit le contexte du projet")
-            print(f"  {C_CYAN}/lire FICHIER{C_END}   : Lit et analyse un fichier")
-            print(f"  {C_CYAN}/corriger FICHIER{C_END}: Corrige un fichier avec sauvegarde")
-            print(f"  {C_CYAN}/expliquer FICHIER{C_END}: Explique un fichier")
-            print(f"  {C_CYAN}/generer FICHIER \"DESC\"{C_END}: Génère un fichier")
-            print(f"  {C_CYAN}/resume DOSSIER{C_END} : Résume un dossier")
-            print(f"  {C_CYAN}/langue CODE{C_END}    : Change la langue active")
-            print(f"  {C_CYAN}/langues{C_END}        : Liste les langues disponibles")
-            print(f"  {C_CYAN}/traduire TEXTE{C_END} : Traduit vers la langue active")
-            print(f"  {C_CYAN}/run CMD{C_END}        : Execute shell")
-            print(f"  {C_CYAN}/activate{C_END}       : Activate Pro license")
-            print(f"  {C_CYAN}/status{C_END}         : Show Free/Pro status")
-            print(f"  {C_CYAN}/clear{C_END}          : Reset terminal")
-            print(f"  {C_CYAN}/config{C_END}         : View settings")
-            print(f"  {C_CYAN}/exit{C_END}           : Shut down")
-            print(f"{C_YELLOW}--------------------------{C_END}\n")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ AGENT DE FICHIERS ━━━━━━━━━━━━━━{C_END}")
+            print(f"  {C_CYAN}/projet [chemin]{C_END}          → analyser un projet")
+            print(f"  {C_CYAN}/lire [fichier]{C_END}           → lire et analyser un fichier")
+            print(f"  {C_CYAN}/modifier [fichier] [msg]{C_END} → modifier un fichier")
+            print(f"  {C_CYAN}/creer [fichier] [desc]{C_END}   → créer un nouveau fichier")
+            print(f"  {C_CYAN}/refactoriser [fichier]{C_END}   → améliorer le code")
+            print(f"  {C_CYAN}/resume [dossier]{C_END}         → résumer un projet")
+            print(f"  {C_CYAN}/corriger [fichier]{C_END}       → corriger avec sauvegarde")
+            print(f"  {C_CYAN}/expliquer [fichier]{C_END}      → expliquer un fichier")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ AGENT TERMINAL ━━━━━━━━━━━━━━━━{C_END}")
+            print(f"  {C_CYAN}/run [commande]{C_END}          → exécuter une commande")
+            print(f"  {C_CYAN}/install{C_END}                  → installer les dépendances")
+            print(f"  {C_CYAN}/build{C_END}                    → compiler le projet")
+            print(f"  {C_CYAN}/start{C_END}                    → démarrer le serveur")
+            print(f"  {C_CYAN}/test{C_END}                     → lancer les tests")
+            print(f"  {C_CYAN}/lint{C_END}                     → vérifier la qualité du code")
+            print(f"  {C_CYAN}/auto [description]{C_END}       → séquence automatique")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ DÉBOGAGE ━━━━━━━━━━━━━━━━━━━━━{C_END}")
+            print(f"  {C_CYAN}/debug [erreur]{C_END}          → analyser une erreur")
+            print(f"  {C_CYAN}/fix [fichier]{C_END}            → corriger automatiquement")
+            print(f"  {C_CYAN}/review [fichier]{C_END}         → revue de code")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ GIT ━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_END}")
+            print(f"  {C_CYAN}/git status | /git diff | /git log | /git branches{C_END}")
+            print(f"  {C_CYAN}/git commit [message]{C_END}     → commiter les changements")
+            print(f"  {C_CYAN}/git push{C_END}                  → pousser vers GitHub")
+            print(f"  {C_CYAN}/git pull | /git branch [nom]{C_END}")
+            print(f"  {C_CYAN}/git explain [hash]{C_END}       → expliquer un commit")
+            print(f"  {C_CYAN}/git resume{C_END}                → résumer les changements")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ TESTS ━━━━━━━━━━━━━━━━━━━━━━━━{C_END}")
+            print(f"  {C_CYAN}/tests ecrire [fichier]{C_END}  → générer des tests")
+            print(f"  {C_CYAN}/tests run{C_END}                → lancer tous les tests")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ MODES ━━━━━━━━━━━━━━━━━━━━━━━━━{C_END}")
+            print(f"  {C_CYAN}/mode suggest{C_END}             → demande confirmation")
+            print(f"  {C_CYAN}/mode autoedit{C_END}            → modifie automatiquement")
+            print(f"  {C_CYAN}/mode fullauto{C_END}            → autonomie totale")
+            print(f"  {C_CYAN}/mode{C_END}                     → affiche le mode actuel")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ SESSION ━━━━━━━━━━━━━━━━━━━━━━{C_END}")
+            print(f"  {C_CYAN}/session save [nom]{C_END}      → sauvegarder la session")
+            print(f"  {C_CYAN}/session list{C_END}             → voir les sessions")
+            print(f"  {C_CYAN}/session resume [nom]{C_END}     → reprendre une session")
+            print(f"  {C_CYAN}/init{C_END}                     → générer AGENTS.md")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ COMPTE ━━━━━━━━━━━━━━━━━━━━━━━{C_END}")
+            print(f"  {C_CYAN}/login | /logout | /solde | /plans | /status | /activate{C_END}")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ MÉMOIRE & DIVERS ━━━━━━━━━━━━━{C_END}")
+            print(f"  {C_CYAN}/memory KEY VAL{C_END}           → stocker une connaissance")
+            print(f"  {C_CYAN}/memoire | /oublier{C_END}        → lire / effacer la mémoire")
+            print(f"  {C_CYAN}/contexte TEXTE{C_END}           → définir le contexte projet")
+            print(f"  {C_CYAN}/langue CODE | /langues{C_END}   → changer la langue")
+            print(f"  {C_CYAN}/traduire TEXTE{C_END}           → traduire vers la langue active")
+            print(f"  {C_CYAN}/clear | /config | /exit{C_END}")
+            print(f"{C_YELLOW}{'━' * 40}{C_END}\n")
             continue
         if line == "/status":
-            print(f"\n{C_GREEN}{licence.status_text(refresh=True)}{C_END}\n")
+            if session:
+                show_solde()
+            else:
+                print(f"\n{C_GREEN}{licence.status_text(refresh=True)}{C_END}\n")
+            continue
+        if line == "/login":
+            nouvelle_session = device_login()
+            if nouvelle_session:
+                session = nouvelle_session
+            continue
+        if line == "/logout":
+            clear_auth()
+            session = None
+            print(f"\n{C_GREEN}✅ Déconnecté avec succès. À bientôt !{C_END}\n")
+            return 0
+        if line == "/solde":
+            show_solde()
+            continue
+        if line == "/plans":
+            show_plans()
             continue
         if line == "/memoire":
             print(memory.memory_summary())
@@ -606,7 +1449,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
             continue
         if line.startswith("/traduire "):
             text = line.removeprefix("/traduire ").strip()
-            code, output = run_provider(provider, langues.translate_prompt(text, langues.get_active_language()), config, cwd)
+            code, output = ai_answer(provider, langues.translate_prompt(text, langues.get_active_language()), config, cwd)
             print(output)
             if code == 0:
                 memory.remember_conversation(line, output)
@@ -618,6 +1461,11 @@ def cmd_chat(args: argparse.Namespace) -> int:
             ok, message = licence.activate_license(license_key)
             color = C_GREEN if ok else C_RED
             print(f"\n{color}{message}{C_END}\n")
+            if ok:
+                print(
+                    f"{C_YELLOW}ℹ️ Après confirmation du paiement, ta clé Pro sera "
+                    "activée automatiquement dans DarkCodex.{C_END}\n"
+                )
             continue
         if line == "/clear":
             print("\033[H\033[J", end="")
@@ -626,27 +1474,56 @@ def cmd_chat(args: argparse.Namespace) -> int:
             print(f" {C_BOLD}MODE:{C_END} {C_GREEN}{licence.status_text(refresh=True)}{C_END}")
             print(f"{C_CYAN}=" * 60 + f"{C_END}\n")
             continue
-        if line.startswith("/run "):
-            command = line.removeprefix("/run ").strip()
-            print(f"\n{C_BOLD}{C_YELLOW}[SYSTEM EXECUTION]{C_END} {command}")
-            exit_code = run_shell(command, cwd, store)
-            color = C_GREEN if exit_code == 0 else C_RED
-            print(f"{color}Finished with exit code: {exit_code}{C_END}\n")
-            continue
-
         # AI Response Area
-        allowed, limit_message = licence.consume_request()
-        if not allowed:
-            print(f"\n{C_RED}{limit_message}{C_END}\n")
-            continue
+        if not session:
+            allowed, limit_message = licence.consume_request()
+            if not allowed:
+                print(f"\n{C_RED}{limit_message}{C_END}\n")
+                continue
         store.add_message(session_id, "user", line)
-        context = build_context(cwd, store, config)
+        context = build_context(cwd, store, config, include_files=bool(config.get("chat_include_files", True)))
         
         print(f"\n{C_MAGENTA}DarkCodex is processing request...{C_END}", end="\r")
-        code, output = run_provider(provider, f"{context}\n\nUser request:\n{line}", config, cwd)
-        print(" " * 40, end="\r") # Clear loader
+        tokens_used = tokens_left = None
+        debut_reponse = time.time()
+        if session:
+            code, output, data = server_answer(session, f"{context}\n\nUser request:\n{line}")
+            print(" " * 40, end="\r")  # Clear loader
+            if code == 402:
+                show_exhausted()
+                session["tokens_solde"] = 0
+                save_auth(session)
+                continue
+            if code == 401:
+                clear_auth()
+                session = None
+                print(f"{C_YELLOW}Session expirée. Tapez /login{C_END}\n")
+                continue
+            if code != 0:
+                print(f"{C_RED}⛔ {output}{C_END}\n")
+                continue
+            session["tokens_solde"] = data.get("solde_restant", session.get("tokens_solde"))
+            save_auth(session)
+            tokens_used = data.get("tokens_utilises")
+            tokens_left = data.get("solde_restant")
+        else:
+            code, output = run_provider(provider, f"{context}\n\nUser request:\n{line}", config, cwd)
+            print(" " * 40, end="\r")  # Clear loader
         
-        store.add_message(session_id, "assistant", output)
+        store.add_message(
+            session_id,
+            "assistant",
+            output,
+            json.dumps(
+                {
+                    "commande": "chat",
+                    "duree_secondes": round(time.time() - debut_reponse, 1),
+                    "tokens_utilises": tokens_used,
+                    "tokens_restants": tokens_left,
+                },
+                ensure_ascii=False,
+            ),
+        )
         memory.remember_conversation(line, output)
         
         # Display AI Response with a clear border/separator and animation
@@ -654,10 +1531,13 @@ def cmd_chat(args: argparse.Namespace) -> int:
         
         # Animate the output with a typewriter effect
         prefix = f"{C_BOLD}{C_CYAN}│{C_END} "
-        type_writer(output, prefix=prefix, delay=0.005)
+        type_writer(output, prefix=prefix, delay=0.001)
         
         print(f"{C_BOLD}{C_CYAN}└" + "─" * 58 + f"{C_END}\n")
         
+        if tokens_used is not None:
+            show_token_line(tokens_used, tokens_left)
+            print()
         if code not in (0, None):
             print(f"{C_RED}[!] ENGINE ERROR: {code}{C_END}\n")
 
@@ -689,8 +1569,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
 
 def save_api_key(api_key: str, config: dict) -> Path:
     api_key_file = Path(str(config.get("api_key_file") or STATE_DIR / "api_key"))
-    api_key_file.parent.mkdir(parents=True, exist_ok=True)
-    api_key_file.write_text(api_key.strip() + "\n")
+    atomic_write_text(api_key_file, api_key.strip() + "\n")
     try:
         api_key_file.chmod(0o600)
     except OSError:
@@ -735,19 +1614,354 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    root = Path(args.cwd).resolve()
-    project_dir = root / ".darkcodex"
-    project_dir.mkdir(exist_ok=True)
-    notes = project_dir / "notes.md"
-    if not notes.exists():
-        notes.write_text(
-            "# DarkCodex Project Notes\n\n"
-            "- Purpose: describe this project here.\n"
-            "- Commands: add build, test, and run commands here.\n"
-            "- Preferences: add local coding preferences here.\n"
-        )
-    print(f"Initialized {project_dir}")
+    config = load_config()
+    provider = detect_provider(config)
+    store = Store()
+    ctx = Ctx(Path(args.cwd).resolve(), provider, config, store=store)
+    return generer_agents_md(ctx)
+
+
+def decouper(line: str) -> tuple[str, str]:
+    parts = line.split(None, 1)
+    if not parts:
+        # "/session" sans argument : ne pas faire planter la boucle de chat.
+        return "", ""
+    return parts[0], parts[1].strip() if len(parts) > 1 else ""
+
+
+def commander_mode(line: str, ctx: Ctx) -> None:
+    """Partie 1 : /mode suggest | autoedit | fullauto | /mode."""
+    _, reste = decouper(line)
+    if not reste:
+        print(f"\n{C_BOLD}Mode actuel : {C_END}{C_GREEN}{ctx.mode.upper()}{C_END}")
+        for nom in MODES:
+            actif = "← actif" if nom == ctx.mode else ""
+            print(f"  {C_CYAN}{nom:<10}{C_END} {MODE_LABELS[nom]} {actif}")
+        print()
+        return
+
+    aliases = {
+        "suggest": "suggest",
+        "autoedit": "autoedit",
+        "auto-edit": "autoedit",
+        "fullauto": "fullauto",
+        "full-auto": "fullauto",
+    }
+    choix = reste.strip().lower()
+    if choix not in aliases:
+        print(f"{C_RED}Mode inconnu : {choix}. Utilise /mode suggest | autoedit | fullauto{C_END}")
+        return
+    mode = aliases[choix]
+
+    # C03 : autoedit et fullauto réservés aux comptes Pro.
+    if mode in {"autoedit", "fullauto"} and not est_pro():
+        print(f"{C_RED}⛔ Ce mode est réservé aux comptes Pro. Passe à la version Pro pour l'activer.{C_END}")
+        return
+    # C13 : fullauto exige en plus un handshake valide.
+    if mode == "fullauto":
+        ok, raison = handshake_valide()
+        if not ok:
+            print(f"{C_RED}⛔ Handshake requis pour le fullauto : {raison}.{C_END}")
+            return
+
+    save_mode(mode)
+    ctx.mode = mode
+    ecrire_handshake()  # C13 : le handshake reflète le mode courant
+    print(f"{C_GREEN}✅ {MODE_LABELS[mode]}{C_END}")
+
+
+def configurer_chat(line: str, ctx: Ctx) -> None:
+    """C11-4 : /config dans le chat — lecture/écriture sans ouvrir un éditeur."""
+    _, reste = decouper(line)
+    if not reste:
+        affiche = {cle: valeur for cle, valeur in ctx.config.items() if cle != "api_key"}
+        print(json.dumps(affiche, indent=2, ensure_ascii=False))
+        return
+    cle, _, valeur = reste.partition(" ")
+    cle = cle.strip()
+    valeur = valeur.strip()
+
+    if cle in {"api-key", "apikey"}:
+        if not valeur:
+            api_key_file = Path(str(ctx.config.get("api_key_file") or STATE_DIR / "api_key"))
+            print("set" if api_key_file.exists() else "not set")
+            return
+        chemin = save_api_key(valeur, ctx.config)
+        ctx.config["provider"] = "darkcodex"
+        save_config(ctx.config)
+        print(f"✅ Clé API enregistrée dans {chemin} (jamais affichée). provider=darkcodex")
+        return
+    if cle == "mode":
+        commander_mode(f"/mode {valeur}", ctx)
+        return
+    if cle == "timeout":
+        cle = "api_timeout_seconds"
+    if cle not in DEFAULT_CONFIG:
+        print(f"Clé inconnue : {cle}. Disponibles : {', '.join(sorted(DEFAULT_CONFIG))}")
+        return
+    if not valeur:
+        print(ctx.config.get(cle, ""))
+        return
+    if cle in {"confirm_always", "chat_include_files"}:
+        ctx.config[cle] = valeur.lower() in {"1", "true", "oui", "yes", "on"}
+    else:
+        ctx.config[cle] = valeur
+    save_config(ctx.config)
+    print(f"{cle}={ctx.config[cle]}")
+
+
+def gerer_memory_chat(line: str, ctx: Ctx) -> None:
+    """C12-1 : /memory lit les dernières réponses IA ; /memory [clé] [valeur] enregistre."""
+    _, reste = decouper(line)
+    if not reste or reste == "historique":
+        lignes = ["🧠 Dernières réponses IA enregistrées :", ""]
+        for row in recent_ai_answers(ctx.cwd, 10):
+            try:
+                meta = json.loads(row["meta_json"] or "{}")
+            except json.JSONDecodeError:
+                meta = {}
+            extra = []
+            if meta.get("tokens_utilises") is not None:
+                extra.append(f"tokens {meta['tokens_utilises']}")
+            if meta.get("duree_secondes") is not None:
+                extra.append(f"{meta['duree_secondes']}s")
+            suffixe = f" ({', '.join(extra)})" if extra else ""
+            extraits = str(row["content"]).replace("\n", " ")[:160]
+            lignes.append(f"• [{row['created_at']}] {extraits}{suffixe}")
+        if len(lignes) == 2:
+            lignes.append("Aucune réponse IA sauvegardée pour ce projet.")
+        print("\n".join(lignes))
+        return
+    sous, arg = decouper(reste)
+    if sous == "add":
+        cle, _, valeur = arg.partition(" ")
+    else:
+        cle, _, valeur = reste.partition(" ")
+    if not cle or not valeur:
+        ctx.note("Usage: /memory | /memory [clé] [valeur] | /memory add [clé] [valeur]")
+        return
+    ctx.store.add_memory(cle, valeur)
+    ctx.note("Enregistré.")
+
+
+def generer_agents_md(ctx: Ctx) -> int:
+    """Partie 7 : /init analyse le projet et génère AGENTS.md."""
+    cible = ctx.cwd / AGENTS_FILENAME
+    if cible.exists():
+        try:
+            existant = cible.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            existant = ""
+        print(f"{AGENTS_FILENAME} existe déjà : rien écrasé.")
+        print(existant)
+        return 0
+
+    info = agent_fichiers.scan_project(ctx.cwd)
+    commande_tests = "python -m pytest tests/"
+    try:
+        from . import agent_tests as _agent_tests
+
+        commande_tests = _agent_tests.detecter_test(ctx.cwd) or commande_tests
+    except ImportError:
+        pass
+
+    prompt = (
+        "Tu es un assistant de programmation expert.\n"
+        "À partir de la structure du projet fournie ci-dessous, crée le fichier AGENTS.md "
+        "qui servira de contexte permanent à l'agent DarkCodex.\n\n"
+        "Le fichier doit contenir exactement ces sections :\n"
+        "# AGENTS.md — Instructions pour DarkCodex\n"
+        "## Architecture\n"
+        "## Stack technique\n"
+        "## Structure des dossiers\n"
+        "## Commandes importantes\n"
+        f"- {commande_tests}\n"
+        "## Règles de code\n"
+        "## Ce qu'il ne faut jamais faire\n\n"
+        "Règles :\n"
+        "- Réponds uniquement avec le contenu du fichier AGENTS.md.\n"
+        "- N'ajoute aucun commentaire avant ou après.\n"
+        "- Ne crée pas de bloc de code Markdown autour du fichier.\n"
+        "- Écris-le en français.\n"
+        "- Reste concis : maximum 60 lignes.\n\n"
+        "Voici la structure du projet :\n\n"
+        f"{agent_fichiers.resume_projet(info)}"
+    )
+    code, texte = ctx.ask(prompt)
+    if code != 0:
+        print(texte)
+        return code
+
+    contenu = agent_fichiers.strip_code_fence(texte)
+    if sys.stdin.isatty():
+        if not agent_fichiers.appliquer_fichier(cible, contenu, ctx, action="agents_md"):
+            return 1
+    else:  # exécution non interactive : darkcodex init
+        cible.write_text(contenu, encoding="utf-8")
+        print(f"{AGENTS_FILENAME} créé : {cible}")
+        ctx.note_modification(cible, "agents_md")
     return 0
+
+
+def handle_agent_command(line: str, ctx: Ctx) -> bool:
+    """Partie 9 : route les commandes vers le bon agent. True si traité."""
+    commande, reste = decouper(line)
+
+    # ── Agent de fichiers ──
+    if commande in {"/projet", "/modifier", "/creer", "/refactoriser"}:
+        agent_fichiers_command(commande, reste, ctx)
+        return True
+
+    # ── Agent terminal ──
+    if commande in {"/install", "/build", "/start", "/lint", "/test"}:
+        agent_terminal.lancer(commande.removeprefix("/"), ctx)
+        return True
+    if commande == "/auto":
+        if not reste:
+            ctx.note("Usage: /auto [description de la tâche]")
+            return True
+        agent_terminal.auto(reste, ctx)
+        return True
+    if commande == "/run":
+        if not reste:
+            ctx.note("Usage: /run [commande]")
+            return True
+        agent_terminal.executer(reste, ctx)
+        return True
+
+    # ── Débogage ──
+    if commande == "/debug":
+        if not reste:
+            ctx.note("Usage: /debug [description de l'erreur]")
+            return True
+        agent_debug.analyser(reste, ctx)
+        return True
+    if commande == "/fix":
+        if not reste:
+            ctx.note("Usage: /fix [fichier]")
+            return True
+        agent_debug.fixer(agent_fichiers.resolve_path(ctx.cwd, reste), ctx)
+        return True
+    if commande == "/review":
+        if not reste:
+            ctx.note("Usage: /review [fichier]")
+            return True
+        agent_debug.review(agent_fichiers.resolve_path(ctx.cwd, reste), ctx)
+        return True
+
+    # ── Git ──
+    if commande == "/git":
+        agent_git.executer(reste.split(), ctx)
+        return True
+
+    # ── Tests ──
+    if commande == "/tests":
+        sous, arg = decouper(reste)
+        if sous == "run":
+            agent_tests.lancer(ctx)
+        elif sous == "ecrire":
+            if not arg:
+                ctx.note("Usage: /tests ecrire [fichier]")
+            else:
+                agent_tests.ecrire(ctx, agent_fichiers.resolve_path(ctx.cwd, arg))
+        else:
+            ctx.note("Usage: /tests run  |  /tests ecrire [fichier]")
+        return True
+
+    # ── Sessions ──
+    if commande == "/session":
+        sous, arg = decouper(reste)
+        if sous == "save":
+            # C06-2 : sauvegarde sur confirmation explicite.
+            if not confirm_user("Sauvegarder la session dans .darkcodex/sessions ?"):
+                ctx.note("Sauvegarde annulée.")
+                return True
+            agent_session.sauvegarder_et_afficher(arg, ctx)
+        elif sous == "list":
+            agent_session.afficher_liste(ctx)
+        elif sous == "resume":
+            agent_session.reprendre(arg or None, ctx)
+        else:
+            ctx.note("Usage: /session save [nom] | /session list | /session resume [nom]")
+        return True
+
+    # ── AGENTS.md ──
+    if commande == "/init":
+        generer_agents_md(ctx)
+        return True
+
+    return False
+
+
+def agent_fichiers_command(commande: str, reste: str, ctx: Ctx) -> None:
+    """/projet /modifier /creer /refactoriser (Partie 2)."""
+    if commande == "/projet":
+        cible = agent_fichiers.resolve_path(ctx.cwd, reste or ".")
+        ok, prompt = agent_fichiers.project_prompt(cible)
+        if not ok:
+            ctx.note(prompt)
+            return
+        info = agent_fichiers.scan_project(cible)
+        ctx.note(agent_fichiers.resume_projet(info))
+        code, texte = ctx.ask(prompt)
+        ctx.note(f"\n\033[95m💡 {texte}\033[0m")
+        return
+
+    if commande == "/modifier":
+        fichier, _, instruction = reste.partition(" ")
+        if not fichier or not instruction:
+            ctx.note("Usage: /modifier [fichier] [instruction]")
+            return
+        cible = agent_fichiers.resolve_path(ctx.cwd, fichier)
+        ok, contenu = agent_fichiers.read_text_file(cible)
+        if not ok:
+            ctx.note(contenu)
+            return
+        code, nouveau = ctx.ask(agent_fichiers.modify_prompt(cible, contenu, instruction))
+        if code != 0:
+            ctx.note(nouveau)
+            return
+        agent_fichiers.appliquer_fichier(cible, nouveau, ctx, action="modification")
+        return
+
+    if commande == "/creer":
+        fichier, _, description = reste.partition(" ")
+        if not fichier or not description:
+            ctx.note('Usage: /creer [fichier] "[description]"')
+            return
+        cible = agent_fichiers.resolve_path(ctx.cwd, fichier)
+        code, contenu = ctx.ask(agent_fichiers.generate_prompt(cible, description.strip('"')))
+        if code != 0:
+            ctx.note(contenu)
+            return
+        agent_fichiers.appliquer_fichier(cible, contenu, ctx, action="creation")
+        return
+
+    if commande == "/refactoriser":
+        if not reste:
+            ctx.note("Usage: /refactoriser [fichier]")
+            return
+        cible = agent_fichiers.resolve_path(ctx.cwd, reste)
+        ok, contenu = agent_fichiers.read_text_file(cible)
+        if not ok:
+            ctx.note(contenu)
+            return
+        code, nouveau = ctx.ask(agent_fichiers.refactor_prompt(cible, contenu))
+        if code != 0:
+            ctx.note(nouveau)
+            return
+        agent_fichiers.appliquer_fichier(cible, nouveau, ctx, action="refactorisation")
+
+
+def cmd_handshake(args: argparse.Namespace) -> int:
+    """C13 : écrit/rafraîchit ~/.darkcodex/handshake.json sans interaction."""
+    data = ecrire_handshake()
+    ok, raison = handshake_valide()
+    print(f"handshake: {'ok' if ok else 'invalide'} ({raison})")
+    print(f"app_id: {data['app_id']}")
+    print(f"mode: {data['mode']}")
+    print(f"pro_active: {data['pro_active']}")
+    return 0 if ok else 1
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -755,7 +1969,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     provider = detect_provider(config)
     api_key_env = str(config.get("api_key_env") or "DARKCODEX_API_KEY")
     api_key_file = Path(str(config.get("api_key_file") or STATE_DIR / "api_key"))
-    api_key_status = "set" if os.environ.get(api_key_env) or os.environ.get("GEMINI_API_KEY") or api_key_file.exists() else "not set"
+    api_key_status = "set" if os.environ.get(api_key_env) or api_key_file.exists() else "not set"
     checks = [
         ("python", shutil.which("python")),
         ("darkcodex api key", api_key_status),
@@ -765,6 +1979,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("DarkCodex doctor")
     print(f"state: {STATE_DIR}")
     print(f"database: {DB_PATH}")
+    hs_ok, hs_raison = handshake_valide()
+    data_hs = lire_handshake()
+    print(f"handshake: {'ok' if hs_ok else 'invalide'} ({hs_raison})")
+    print(f"handshake app_id: {data_hs.get('app_id', '-')}")
+    print(f"handshake mode: {data_hs.get('mode', '-')}")
+    print(f"handshake pro: {data_hs.get('pro_active', '-')}")
+    print(f"Mode: {load_mode()}")
     print(f"configured provider: {config.get('provider', 'auto')}")
     print(f"detected provider: {provider}")
     for name, path in checks:
@@ -776,7 +1997,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="darkcodex", description="DarkCodex terminal coding assistant.")
-    parser.add_argument("--version", action="version", version="DarkCodex 0.1.0")
+    parser.add_argument("--version", action="version", version=f"DarkCodex {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     ask = sub.add_parser("ask", help="Ask one question and print the answer.")
@@ -824,6 +2045,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="Check local setup and providers.")
     doctor.set_defaults(func=cmd_doctor)
+
+    handshake = sub.add_parser("handshake", help="Write and validate the local handshake file.")
+    handshake.set_defaults(func=cmd_handshake)
     return parser
 
 

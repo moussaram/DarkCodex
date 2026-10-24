@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DarkCodex — Connecter votre terminal</title>
+<style>
+  :root {
+    --rouge: #CC0000;
+    --rouge-hover: #ff1a1a;
+    --fond: #050505;
+    --panneau: #0e0e0e;
+    --bord: #232323;
+    --texte: #f2f2f2;
+    --muted: #8a8a8a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--fond);
+    color: var(--texte);
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .logo {
+    font-size: 30px;
+    font-weight: 800;
+    letter-spacing: -1px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .logo b { color: var(--rouge); }
+  .tagline {
+    color: var(--muted);
+    font-size: 13px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-bottom: 34px;
+  }
+  .carte {
+    width: 100%;
+    max-width: 440px;
+    background: var(--panneau);
+    border: 1px solid var(--bord);
+    border-top: 3px solid var(--rouge);
+    border-radius: 10px;
+    padding: 34px 30px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,.7);
+  }
+  h1 { font-size: 21px; margin: 0 0 8px; }
+  .sous { color: var(--muted); font-size: 14px; margin: 0 0 26px; line-height: 1.5; }
+  input[type="text"], input[type="email"] {
+    width: 100%;
+    background: #000;
+    border: 1px solid var(--bord);
+    color: var(--texte);
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: 6px;
+    text-align: center;
+    padding: 18px 12px;
+    border-radius: 8px;
+    outline: none;
+    text-transform: uppercase;
+  }
+  input[type="email"] { font-size: 17px; letter-spacing: normal; text-transform: none; }
+  input:focus { border-color: var(--rouge); }
+  .bouton {
+    display: block;
+    width: 100%;
+    border: 0;
+    border-radius: 8px;
+    padding: 15px;
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+    margin-top: 16px;
+    transition: background .15s ease, transform .05s ease;
+  }
+  .bouton:active { transform: translateY(1px); }
+  .rouge { background: var(--rouge); color: #fff; }
+  .rouge:hover { background: var(--rouge-hover); }
+  .sombre { background: #161616; color: var(--texte); border: 1px solid var(--bord); }
+  .sombre:hover { background: #1f1f1f; }
+  .google {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    background: #fff; color: #111;
+  }
+  .google:hover { background: #ececec; }
+  .sep {
+    display: flex; align-items: center; gap: 12px;
+    color: var(--muted); font-size: 12px; margin: 20px 0 4px;
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .sep::before, .sep::after { content: ""; flex: 1; height: 1px; background: var(--bord); }
+  .message {
+    margin-top: 18px;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 12px 14px;
+    border-radius: 6px;
+    background: #141414;
+    border: 1px solid var(--bord);
+    display: none;
+  }
+  .message.visible { display: block; }
+  .message.ok { border-color: #1d5c2e; background: #0d1f13; color: #7ee2a0; }
+  .message.ko { border-color: #6b1414; background: #1f0d0d; color: #ff8f8f; }
+  .succes { font-size: 17px; font-weight: 700; color: #7ee2a0; margin-bottom: 6px; }
+  .compte {
+    margin-top: 22px; font-size: 12px; color: var(--muted);
+    display: flex; justify-content: space-between; gap: 10px; align-items: center;
+  }
+  .lien { color: var(--rouge-hover); cursor: pointer; background: none; border: 0; font-size: 12px; padding: 0; }
+  .chargement { color: var(--muted); font-size: 14px; }
+  footer { margin-top: 22px; color: #4a4a4a; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="logo">Dark<b>Codex</b></div>
+<div class="tagline">Unrestricted AI</div>
+
+<div class="carte">
+  <!-- ═══════════════════════════════════════════════════════════
+       CONFIGURATION — remplace ces 3 valeurs avant mise en ligne.
+       La clé anon est publique (elle ne donne accès à rien : les
+       tables sont en RLS, seul le serveur y accède avec sa service key).
+       ═══════════════════════════════════════════════════════════ -->
+  <script>
+    const SUPABASE_URL = "https://xxxx.supabase.co";
+    const SUPABASE_ANON_KEY = "REMPLACE_TA_CLE_ANON";
+    const API_BASE = "https://darkcodex.onrender.com";
+    // Autorise l'URL de cette page dans Supabase : Auth → URL Configuration.
+  </script>
+
+  <!-- Écran de connexion (Google / Email) -->
+  <section id="ecran-login">
+    <h1>Connexion requise</h1>
+    <p class="sous">Connectez-vous pour relier votre terminal à votre compte DarkCodex.</p>
+    <button id="btn-google" class="bouton google" type="button">
+      <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+        <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.6 30.2 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.8 6.1C12.3 13.1 17.6 9.5 24 9.5z"/>
+        <path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.2-.4-4.7H24v9h12.7c-.6 3-2.3 5.5-4.9 7.2l7.6 5.9c4.4-4.1 7.1-10.2 7.1-17.4z"/>
+        <path fill="#FBBC05" d="M10.4 28.7a14.6 14.6 0 0 1 0-9.4l-7.8-6.1a24 24 0 0 0 0 21.6l7.8-6.1z"/>
+        <path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.6-5.9c-2.1 1.4-4.8 2.3-8.3 2.3-6.4 0-11.7-3.6-13.6-8.6l-7.8 6.1C6.5 42.6 14.6 48 24 48z"/>
+      </svg>
+      Continuer avec Google
+    </button>
+
+    <div class="sep">ou par email</div>
+
+    <form id="form-email" novalidate>
+      <input type="email" id="email" placeholder="vous@exemple.com" autocomplete="email" required>
+      <button class="bouton rouge" type="submit">Recevoir un lien de connexion</button>
+    </form>
+
+    <div id="msg-login" class="message"></div>
+
+    <div class="compte">
+      <span>Pas de compte ? Il est créé automatiquement.</span>
+    </div>
+  </section>
+
+  <!-- Écran de saisie du code -->
+  <section id="ecran-code" style="display:none">
+    <h1>Connecter votre terminal</h1>
+    <p class="sous">Entrez le code affiché dans votre terminal</p>
+
+    <form id="form-code" novalidate>
+      <input type="text" id="code" placeholder="DARK-XXXX" maxlength="9"
+             autocomplete="one-time-code" spellcheck="false" required>
+      <button class="bouton rouge" type="submit">Confirmer</button>
+    </form>
+
+    <div id="msg-code" class="message"></div>
+
+    <div class="compte">
+      <span id="utilisateur"></span>
+      <button class="lien" id="btn-logout" type="button">Se déconnecter</button>
+    </div>
+  </section>
+
+  <!-- Confirmation réussie -->
+  <section id="ecran-ok" style="display:none">
+    <div class="succes">✅ Terminal connecté avec succès !</div>
+    <p class="sous">Retournez à votre terminal : il a déjà détecté la confirmation.</p>
+  </section>
+</div>
+
+<footer>darkcodex.onrender.com</footer>
+
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+  const PENDING_KEY = "darkcodex_pending_code";
+
+  function afficher(section) {
+    for (const id of ["ecran-login", "ecran-code", "ecran-ok"]) {
+      $(id).style.display = id === section ? "" : "none";
+    }
+  }
+
+  function message(cible, texte, type) {
+    const node = $(cible);
+    node.textContent = texte;
+    node.className = "message visible" + (type ? " " + type : "");
+  }
+
+  function normaliserCode(valeur) {
+    let code = (valeur || "").trim().toUpperCase().replace(/\s+/g, "");
+    if (/^DARK[A-Z0-9]{4}$/.test(code)) code = "DARK-" + code.slice(4);
+    return code;
+  }
+
+  if (SUPABASE_ANON_KEY === "REMPLACE_TA_CLE_ANON" || SUPABASE_URL.includes("xxxx")) {
+    afficher("ecran-login");
+    message("msg-login", "Configuration manquante : renseignez SUPABASE_URL et SUPABASE_ANON_KEY en haut de web/device.html.", "ko");
+    throw new Error("configuration absente");
+  }
+
+  const { createClient } = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm");
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { detectSessionInUrl: true, flowType: "implicit", persistSession: true, autoRefreshToken: true },
+  });
+
+  async function sessionCourante() {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) return null;
+    return data.session || null;
+  }
+
+  async function afficherEcran(session) {
+    if (!session) {
+      afficher("ecran-login");
+      return;
+    }
+    const pending = localStorage.getItem(PENDING_KEY);
+    afficher("ecran-code");
+    const email = session.user?.email || "";
+    $("utilisateur").textContent = email;
+    const champ = $("code");
+    champ.value = pending ? normaliserCode(pending) : "";
+    champ.focus();
+  }
+
+  // ── Connexion Google ────────────────────────────────────────
+  $("btn-google").addEventListener("click", async () => {
+    const code = normaliserCode($("code")?.value);
+    if (code) localStorage.setItem(PENDING_KEY, code);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin + window.location.pathname },
+    });
+    if (error) message("msg-login", error.message, "ko");
+  });
+
+  // ── Connexion par email (lien magique) ──────────────────────
+  $("form-email").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const email = $("email").value.trim();
+    if (!email) return;
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { redirectTo: window.location.origin + window.location.pathname },
+    });
+    if (error) {
+      message("msg-login", error.message, "ko");
+    } else {
+      message("msg-login", "✅ Email envoyé ! Ouvrez le lien reçu pour vous connecter.", "ok");
+    }
+  });
+
+  // ── Saisie du code ──────────────────────────────────────────
+  $("code").addEventListener("input", (event) => {
+    event.target.value = event.target.value.toUpperCase().replace(/^DARK(?!-)/, "DARK-");
+    localStorage.setItem(PENDING_KEY, event.target.value.trim());
+  });
+
+  $("form-code").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const code = normaliserCode($("code").value);
+    if (!/^DARK-[A-Z0-9]{4}$/.test(code)) {
+      message("msg-code", "Format attendu : DARK-XXXX", "ko");
+      return;
+    }
+    const session = await sessionCourante();
+    if (!session) {
+      afficher("ecran-login");
+      return;
+    }
+
+    const bouton = $("form-code").querySelector("button");
+    bouton.disabled = true;
+    bouton.textContent = "Confirmation...";
+    try {
+      const response = await fetch(API_BASE + "/device/confirm", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + session.access_token,
+        },
+        body: JSON.stringify({ code, token: session.access_token }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = data.detail;
+        const texte = typeof detail === "string" ? detail : (detail && detail.message) || "Confirmation impossible.";
+        message("msg-code", "⛔ " + texte, "ko");
+      } else {
+        localStorage.removeItem(PENDING_KEY);
+        afficher("ecran-ok");
+      }
+    } catch (err) {
+      message("msg-code", "⛔ Serveur injoignable : " + err.message, "ko");
+    } finally {
+      bouton.disabled = false;
+      bouton.textContent = "Confirmer";
+    }
+  });
+
+  // ── Déconnexion ─────────────────────────────────────────────
+  $("btn-logout").addEventListener("click", async () => {
+    await supabase.auth.signOut();
+    afficher("ecran-login");
+  });
+
+  // ── État initial ────────────────────────────────────────────
+  (async () => {
+    const session = await sessionCourante();
+    await afficherEcran(session);
+  })();
+
+  supabase.auth.onAuthStateChange((_event, session) => {
+    if ($("ecran-ok").style.display !== "none") return;
+    afficherEcran(session);
+  });
+</script>
+</body>
+</html>

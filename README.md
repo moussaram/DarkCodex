@@ -60,6 +60,7 @@ En chat:
 
 ```text
 /help
+/ask "explique ce projet"
 /memory cle valeur
 /run python -m pytest
 /config
@@ -67,6 +68,9 @@ En chat:
 /activate
 /exit
 ```
+
+`/activate` enregistre ta cle Pro : la cle n'est activee qu'apres confirmation du
+paiement par Moov Money (voir section Freemium).
 
 ## Configuration API
 
@@ -92,6 +96,7 @@ La cle `DARKCODEX_SUPABASE_SERVICE_KEY` sert uniquement au script local `generer
 
 - Mode gratuit: 20 requetes par jour.
 - Mode Pro: illimite apres activation d'une licence valide.
+- La cle est activee uniquement apres confirmation du paiement par Moov Money.
 - Donnees locales Freemium: `~/.darkcodex_data.json`.
 - SQL Supabase: executer `supabase_licences.sql` dans le SQL Editor Supabase.
 

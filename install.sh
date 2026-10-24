@@ -34,6 +34,13 @@ echo "--------------------------------------------------"
 echo "DarkCodex installe avec succes dans $BIN_DIR"
 echo "Commandes disponibles: darkcodex, DarkCodex"
 echo "--------------------------------------------------"
+echo "Verification de l'installation..."
+python -m pip install python-dotenv || true
+python -m darkcodex handshake || true
+echo "--------------------------------------------------"
+echo "Etat du systeme:"
+python -m darkcodex doctor || true
+echo "--------------------------------------------------"
 echo "Pour commencer, tape: darkcodex"
 echo "Si la commande n'est pas trouvee, relance ton terminal"
 echo "ou tape: export PATH=\"\$HOME/.local/bin:\$PATH\""

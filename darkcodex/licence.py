@@ -6,6 +6,17 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from .fsutil import atomic_write_text
+
+# C15 : .env chargé uniquement si DARKCODEX_LOAD_DOTENV=1, sinon aucun effet
+# de bord au démarrage et aucun crash si python-dotenv n'est pas installé.
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - dépendance optionnelle
+    load_dotenv = None  # type: ignore[assignment]
+if os.environ.get("DARKCODEX_LOAD_DOTENV") == "1" and load_dotenv:
+    load_dotenv()
+
 DATA_PATH = Path(os.environ.get("DARKCODEX_LICENSE_PATH", Path.home() / ".darkcodex_data.json"))
 FREE_DAILY_LIMIT = 20
 
@@ -33,7 +44,13 @@ def default_data() -> dict:
     }
 
 
-def load_data(path: Path = DATA_PATH) -> dict:
+def _chemin(path: Path | None = None) -> Path:
+    """Chemin résolu à l'appel (testable, et jamais de figement de DATA_PATH)."""
+    return Path(path) if path is not None else DATA_PATH
+
+
+def load_data(path: Path | None = None) -> dict:
+    path = _chemin(path)
     if not path.exists():
         data = default_data()
         save_data(data, path)
@@ -51,10 +68,10 @@ def load_data(path: Path = DATA_PATH) -> dict:
     return merged
 
 
-def save_data(data: dict, path: Path = DATA_PATH) -> None:
-    if path.parent != Path("."):
-        path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+def save_data(data: dict, path: Path | None = None) -> None:
+    # C01-4 : écriture atomique — jamais de fichier de licence tronqué.
+    path = _chemin(path)
+    atomic_write_text(path, json.dumps(data, indent=2) + "\n")
     try:
         path.chmod(0o600)
     except OSError:
@@ -100,7 +117,7 @@ def verify_license(license_key: str, timeout: int = 20) -> tuple[bool, str]:
     return bool(rows[0].get("actif")), str(rows[0].get("email") or "")
 
 
-def refresh_license_status(path: Path = DATA_PATH) -> dict:
+def refresh_license_status(path: Path | None = None) -> dict:
     data = load_data(path)
     license_key = str(data.get("license_key") or "")
     if not license_key:
@@ -115,7 +132,7 @@ def refresh_license_status(path: Path = DATA_PATH) -> dict:
     return data
 
 
-def activate_license(license_key: str, path: Path = DATA_PATH) -> tuple[bool, str]:
+def activate_license(license_key: str, path: Path | None = None) -> tuple[bool, str]:
     active, email = verify_license(license_key)
     data = load_data(path)
     if not active:
@@ -129,7 +146,7 @@ def activate_license(license_key: str, path: Path = DATA_PATH) -> tuple[bool, st
     return True, "Licence Pro activee. Mode PRO illimite."
 
 
-def status_text(path: Path = DATA_PATH, refresh: bool = False) -> str:
+def status_text(path: Path | None = None, refresh: bool = False) -> str:
     data = refresh_license_status(path) if refresh else load_data(path)
     if data.get("pro_active"):
         email = data.get("license_email") or "email non renseigne"
@@ -139,7 +156,7 @@ def status_text(path: Path = DATA_PATH, refresh: bool = False) -> str:
     return f"Mode actuel: Gratuit - {remaining}/{FREE_DAILY_LIMIT} requetes restantes aujourd'hui"
 
 
-def consume_request(path: Path = DATA_PATH) -> tuple[bool, str]:
+def consume_request(path: Path | None = None) -> tuple[bool, str]:
     data = refresh_license_status(path)
     if data.get("pro_active"):
         return True, ""

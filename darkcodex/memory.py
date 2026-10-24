@@ -55,6 +55,11 @@ def set_project_context(text: str, path: Path = MEMORY_PATH) -> None:
     save_memory(data, path)
 
 
+def get_project_context(path: Path = MEMORY_PATH) -> str:
+    """C07 : contexte projet sauvegardé, jamais d'erreur si le fichier manque."""
+    return str(load_memory(path).get("contexte_projet") or "").strip()
+
+
 def clear_memory(path: Path = MEMORY_PATH) -> None:
     save_memory(default_memory(), path)
 

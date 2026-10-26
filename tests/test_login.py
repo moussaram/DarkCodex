@@ -6,8 +6,11 @@ Ces tests couvrent les 3 cas imposés par la spec :
   3. tokens épuisés
 """
 
+import asyncio
 import contextlib
 import datetime as dt
+import hashlib
+import hmac
 import io
 import json
 import tempfile
@@ -21,9 +24,10 @@ try:
     from server import device as srv_device
     from server import gemini as srv_gemini
     from server import main as srv_main
+    from server import saspay as srv_saspay
     SERVEUR_OK, SERVEUR_ABSENTE = True, ""
 except ImportError as exc:  # fastapi/requests du serveur non installés
-    srv_device = srv_gemini = srv_main = None  # type: ignore[assignment]
+    srv_device = srv_gemini = srv_main = srv_saspay = None  # type: ignore[assignment]
     SERVEUR_OK, SERVEUR_ABSENTE = False, str(exc)
 
 
@@ -170,59 +174,169 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(data["tokens_utilises"], 0)
 
 
+PAIEMENT = {"session_id": "s1", "user_id": "u1", "plan": "starter", "tokens": 50000,
+            "montant_fcfa": 500, "statut": "en_attente"}
+PAYE = {"status": "PAID", "transaction_status": "SUCCESS"}
+SESSION_OK = {"amount": "500.00", "currency": "XOF", "metadata": {"user_id": "u1", "plan": "starter"}}
+
+
+class FauxRequest:
+    def __init__(self, corps: bytes, entetes: dict):
+        self._corps, self.headers = corps, entetes
+
+    async def body(self):
+        return self._corps
+
+
+def signer(corps: bytes, secret: str, ts: int) -> str:
+    return hmac.new(secret.encode(), f"{ts}.".encode() + corps, hashlib.sha256).hexdigest()
+
+
 @skip_serveur
 class PaiementTests(unittest.TestCase):
-    def test_paiement_approuve_credite_les_tokens(self):
-        payload = srv_main.PaiementIn(transaction_id="tx-1", plan="starter", user_id="u1")
-        with mock.patch.object(srv_device, "verifier_token", return_value=dict(PROFIL_VALIDE)), mock.patch.object(
-            srv_device, "lire_plan", return_value={"nom": "starter", "tokens": 50000, "prix_fcfa": 500}
-        ), mock.patch.object(
-            srv_main, "_transaction_fedapay", return_value={"status": "approved"}
-        ), mock.patch.object(
-            srv_device, "lire_profil", return_value={"tokens_solde": 5000}
-        ), mock.patch.object(
-            srv_device, "maj_profil", return_value={"tokens_solde": 55000}
-        ) as maj, mock.patch.object(
-            srv_device, "enregistrer_achat"
-        ) as achat, mock.patch.object(
-            srv_device, "deja_credite", return_value=False
-        ):
-            status, data = call(srv_main.confirmer_paiement, payload, authorization="Bearer jwt-demo")
+    def lancer(self, paiement=None, statut=None, details=None, reserve=True, credit_echoue=False):
+        paiement = dict(PAIEMENT) if paiement is None else paiement
+        with contextlib.ExitStack() as pile:
+            m = {}
+            pile.enter_context(mock.patch.object(srv_device, "verifier_token", return_value=dict(PROFIL_VALIDE)))
+            pile.enter_context(mock.patch.object(srv_device, "lire_paiement", return_value=paiement))
+            pile.enter_context(mock.patch.object(srv_saspay, "statut_session", return_value=PAYE if statut is None else statut))
+            pile.enter_context(mock.patch.object(srv_saspay, "lire_session", return_value=dict(SESSION_OK) if details is None else details))
+            m["reserve"] = pile.enter_context(mock.patch.object(srv_device, "reserver_paiement", return_value=reserve))
+            m["credit"] = pile.enter_context(mock.patch.object(
+                srv_device, "crediter_profil",
+                side_effect=RuntimeError("boom") if credit_echoue else None,
+                return_value={"tokens_solde": 55000}))
+            m["achat"] = pile.enter_context(mock.patch.object(srv_device, "enregistrer_achat"))
+            m["anomalie"] = pile.enter_context(mock.patch.object(srv_device, "marquer_anomalie"))
+            m["libere"] = pile.enter_context(mock.patch.object(srv_device, "liberer_paiement"))
+            status, data = call(srv_main.confirmer_paiement, srv_main.PaiementIn(session_id="s1"), authorization="Bearer jwt-demo")
+        return status, data, m
 
-        self.assertEqual(status, 200)
-        self.assertEqual(data["status"], "confirme")
-        self.assertEqual(data["tokens_ajoutes"], 50000)
-        maj.assert_called_once_with("u1", {"tokens_solde": 55000, "plan": "starter"})
-        achat.assert_called_once_with("u1", "starter", 50000, 500, "tx-1")
+    def test_paiement_valide_credite_les_tokens(self):
+        status, data, m = self.lancer()
+        self.assertEqual((status, data["status"], data["tokens_ajoutes"]), (200, "confirme", 50000))
+        m["credit"].assert_called_once_with("u1", 50000, "starter")
+        m["achat"].assert_called_once_with("u1", "starter", 50000, 500, "s1")
 
-    def test_paiement_deja_credite_n_est_pas_rejoue(self):
-        payload = srv_main.PaiementIn(transaction_id="tx-1", plan="starter", user_id="u1")
-        with mock.patch.object(srv_device, "verifier_token", return_value=dict(PROFIL_VALIDE)), mock.patch.object(
-            srv_device, "lire_plan", return_value={"nom": "starter", "tokens": 50000, "prix_fcfa": 500}
-        ), mock.patch.object(
-            srv_main, "_transaction_fedapay", return_value={"status": "approved"}
-        ), mock.patch.object(
-            srv_device, "lire_profil", return_value={"tokens_solde": 55000}
-        ), mock.patch.object(
-            srv_device, "maj_profil"
-        ) as maj, mock.patch.object(
-            srv_device, "deja_credite", return_value=True
-        ):
-            status, data = call(srv_main.confirmer_paiement, payload, authorization="Bearer jwt-demo")
-
-        self.assertEqual(status, 200)
+    def test_deuxieme_appel_ne_credite_pas_deux_fois(self):
+        status, data, m = self.lancer(reserve=False)
         self.assertEqual(data["status"], "deja_credite")
-        maj.assert_not_called()
+        m["credit"].assert_not_called()
 
-    def test_paiement_non_approuve_est_rejete(self):
-        payload = srv_main.PaiementIn(transaction_id="tx-2", plan="pro")
-        with mock.patch.object(srv_device, "verifier_token", return_value=dict(PROFIL_VALIDE)), mock.patch.object(
-            srv_device, "lire_plan", return_value={"nom": "pro", "tokens": 500000, "prix_fcfa": 2500}
-        ), mock.patch.object(srv_main, "_transaction_fedapay", return_value={"status": "declined"}):
-            status, data = call(srv_main.confirmer_paiement, payload, authorization="Bearer jwt-demo")
+    def test_paiement_deja_credite_localement(self):
+        status, data, m = self.lancer(paiement={**PAIEMENT, "statut": "credite"})
+        self.assertEqual(data["status"], "deja_credite")
+        m["reserve"].assert_not_called()
 
+    def test_paiement_non_paye_est_rejete(self):
+        status, data, m = self.lancer(statut={"status": "PENDING", "transaction_status": "PENDING"})
+        self.assertEqual((status, data["status"], data["etat"]), (402, "paiement_non_valide", "pending"))
+        m["credit"].assert_not_called()
+
+    def test_session_payee_sans_transaction_success_est_rejetee(self):
+        status, data, m = self.lancer(statut={"status": "PAID", "transaction_status": "FAILED"})
         self.assertEqual(status, 402)
-        self.assertEqual(data["status"], "paiement_non_valide")
+
+    def test_montant_incoherent_est_bloque(self):
+        status, data, m = self.lancer(details={**SESSION_OK, "amount": "100.00"})
+        self.assertEqual((status, data["status"]), (409, "paiement_incoherent"))
+        m["anomalie"].assert_called_once_with("s1")
+        m["credit"].assert_not_called()
+
+    def test_session_d_un_autre_utilisateur_est_introuvable(self):
+        status, data, m = self.lancer(paiement={**PAIEMENT, "user_id": "u2"})
+        self.assertEqual(status, 404)
+        m["credit"].assert_not_called()
+
+    def test_echec_du_credit_reouvre_le_paiement(self):
+        status, data, m = self.lancer(credit_echoue=True)
+        self.assertEqual(data.status_code, 503)
+        m["libere"].assert_called_once_with("s1")
+        m["achat"].assert_not_called()
+
+    def test_creer_paiement_utilise_le_prix_du_serveur(self):
+        profil = dict(PROFIL_VALIDE, email="awa@example.com", nom="Awa")
+        with mock.patch.object(srv_device, "verifier_token", return_value=profil), mock.patch.object(
+            srv_device, "lire_plan", return_value={"nom": "starter", "tokens": 50000, "prix_fcfa": 500}
+        ), mock.patch.object(
+            srv_saspay, "creer_session", return_value={"id": "s1", "checkout_url": "https://pay.saspay.me/c/x"}
+        ) as creer, mock.patch.object(srv_device, "creer_paiement") as enreg:
+            status, data = call(srv_main.paiement_creer, srv_main.PaiementCreerIn(plan="starter"), authorization="Bearer jwt-demo")
+        self.assertEqual((status, data["checkout_url"], data["montant"]), (200, "https://pay.saspay.me/c/x", 500))
+        self.assertEqual(creer.call_args.kwargs["montant"], 500)
+        self.assertEqual(creer.call_args.kwargs["metadata"], {"user_id": profil["user_id"], "plan": "starter"})
+        enreg.assert_called_once_with(profil["user_id"], "starter", 50000, 500, "s1")
+
+    def test_plan_gratuit_non_payable(self):
+        with mock.patch.object(srv_device, "verifier_token", return_value=dict(PROFIL_VALIDE, email="a@b.c")), mock.patch.object(
+            srv_device, "lire_plan", return_value={"nom": "gratuit", "tokens": 5000, "prix_fcfa": 0}
+        ):
+            status, data = call(srv_main.paiement_creer, srv_main.PaiementCreerIn(plan="gratuit"), authorization="Bearer jwt-demo")
+        self.assertEqual(status, 400)
+
+
+@skip_serveur
+class SasPayTests(unittest.TestCase):
+    ENV = {"SASPAY_SECRET_KEY": "sk_test_abc", "SASPAY_WEBHOOK_SECRET": "whsec_x"}
+
+    def test_signature_valide_fausse_et_trop_ancienne(self):
+        corps, ts = b'{"event":"transaction.success"}', 1_000_000
+        bonne = signer(corps, "whsec_x", ts)
+        self.assertTrue(srv_saspay.verifier_signature(corps, bonne, str(ts), "whsec_x", maintenant=ts + 10))
+        self.assertFalse(srv_saspay.verifier_signature(corps + b" ", bonne, str(ts), "whsec_x", maintenant=ts + 10))
+        self.assertFalse(srv_saspay.verifier_signature(corps, bonne, str(ts), "autre", maintenant=ts + 10))
+        self.assertFalse(srv_saspay.verifier_signature(corps, bonne, str(ts), "whsec_x", maintenant=ts + 301))
+        self.assertFalse(srv_saspay.verifier_signature(corps, bonne, "pas-un-nombre", "whsec_x"))
+
+    def test_est_paye_exige_session_et_transaction(self):
+        self.assertTrue(srv_saspay.est_paye(PAYE))
+        self.assertFalse(srv_saspay.est_paye({"status": "PAID"}))
+        self.assertFalse(srv_saspay.est_paye({"status": "PENDING", "transaction_status": "SUCCESS"}))
+
+    def test_meme_montant(self):
+        self.assertTrue(srv_saspay.meme_montant("500.00", 500))
+        self.assertFalse(srv_saspay.meme_montant("499.99", 500))
+        self.assertFalse(srv_saspay.meme_montant("abc", 500))
+
+    def test_creer_session_enveloppe_ou_objet_seul(self):
+        for corps in ({"success": True, "code": 201, "data": {"id": "s1", "checkout_url": "https://pay/x"}},
+                      {"id": "s1", "checkout_url": "https://pay/x"}):
+            with mock.patch.dict("os.environ", self.ENV), mock.patch.object(srv_saspay.requests, "request") as req:
+                req.return_value.ok = True
+                req.return_value.json.return_value = corps
+                session = srv_saspay.creer_session(montant=500, description="d", email="a@b.c", nom="Awa")
+            self.assertEqual(session["id"], "s1")
+            envoye = req.call_args.kwargs["json"]
+            self.assertEqual((envoye["amount"], envoye["currency"]), ("500.00", "XOF"))
+            self.assertEqual(req.call_args.kwargs["headers"]["Authorization"], "Bearer sk_test_abc")
+
+    def test_erreur_saspay_ne_fuit_pas_la_cle(self):
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(srv_saspay.requests, "request") as req:
+            req.return_value.ok = False
+            req.return_value.status_code = 401
+            req.return_value.json.return_value = {"success": False, "error": {"message": "Clé invalide", "code": "x"}}
+            with self.assertRaises(srv_saspay.SasPayError) as ctx:
+                srv_saspay.statut_session("s1")
+        self.assertNotIn("sk_test_abc", str(ctx.exception))
+
+    def test_webhook_signature_invalide_refuse(self):
+        req = FauxRequest(b"{}", {"X-Webhook-Signature": "faux", "X-Webhook-Timestamp": "1"})
+        with mock.patch.dict("os.environ", self.ENV):
+            with self.assertRaises(srv_main.HTTPException) as ctx:
+                asyncio.run(srv_main.webhook_saspay(req))
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_webhook_valide_declenche_la_reconciliation(self):
+        import time
+        corps, ts = b'{"event":"transaction.success","data":{}}', int(time.time())
+        req = FauxRequest(corps, {"X-Webhook-Signature": signer(corps, "whsec_x", ts), "X-Webhook-Timestamp": str(ts)})
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            srv_main, "_reconcilier", return_value={"ok": True, "credites": 1}
+        ) as rec:
+            data = asyncio.run(srv_main.webhook_saspay(req))
+        self.assertEqual(data["credites"], 1)
+        rec.assert_called_once()
 
 
 class CliLoginTests(unittest.TestCase):
@@ -438,14 +552,16 @@ class SupabaseRestTests(unittest.TestCase):
         ):
             self.assertEqual(srv_device.verifier_code("DARK-4829")["status"], "expire")
 
-    def test_deja_credite_et_enregistre_achat(self):
+    def test_enregistre_achat_et_reserve_une_seule_fois(self):
         with mock.patch.dict("os.environ", self.ENV, clear=False), mock.patch.object(
-            srv_device.requests, "get"
-        ) as get:
-            get.return_value.ok = True
-            get.return_value.json.return_value = [{"id": "a1"}]
-            self.assertTrue(srv_device.deja_credite("tx-1"))
-            self.assertIn("transaction_id=eq.tx-1", get.call_args.args[0])
+            srv_device.requests, "patch"
+        ) as patch:
+            patch.return_value.ok = True
+            patch.return_value.json.return_value = [{"id": "p1"}]
+            self.assertTrue(srv_device.reserver_paiement("s1"))
+            self.assertIn("statut=eq.en_attente", patch.call_args.args[0])
+            patch.return_value.json.return_value = []
+            self.assertFalse(srv_device.reserver_paiement("s1"))
 
         with mock.patch.dict("os.environ", self.ENV, clear=False), mock.patch.object(
             srv_device.requests, "post"

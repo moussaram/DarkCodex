@@ -121,3 +121,19 @@ Tu peux changer l'emplacement avec:
 ```sh
 export DARKCODEX_HOME=/chemin/vers/etat
 ```
+
+## Paiements (SasPay, côté serveur)
+
+Les achats de tokens passent par SasPay (mobile money / carte, devise XOF).
+Tout se passe sur le serveur (`server/`), jamais dans le terminal.
+
+1. Exécuter `supabase_paiements.sql` dans le SQL Editor de Supabase.
+2. Renseigner `SASPAY_SECRET_KEY` et `SASPAY_WEBHOOK_SECRET` dans l'environnement
+   du serveur (voir `server/.env.example`). Commencer avec une clé `sk_test_`.
+3. Dans le tableau de bord SasPay, créer un webhook vers
+   `https://<ton-serveur>/webhooks/saspay` pour l'événement `transaction.success`.
+4. Le site des abonnements appelle :
+   - `POST /paiement/creer` avec `{"plan": "starter"}` (jeton de l'utilisateur) :
+     la réponse contient `checkout_url` (rediriger le client) et `session_id` ;
+   - puis `POST /confirmer-paiement` avec `{"session_id": "..."}` quand le client revient.
+   Les tokens sont aussi crédités automatiquement après le webhook.

@@ -7,18 +7,22 @@ Endpoints :
   GET  /verify-token        contrôle du token au lancement du CLI
   POST /chat                envoi d'un message à Gemini + décompte des tokens
   GET  /solde               solde du compte
-  POST /confirmer-paiement  validation d'un paiement FedaPay
+  POST /paiement/creer      crée une page de paiement SasPay pour un plan
+  POST /confirmer-paiement  vérifie le paiement auprès de SasPay puis crédite les tokens
+  POST /webhooks/saspay     notifications signées de SasPay
   GET  /device              page web/device.html
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
-import requests
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -45,9 +49,9 @@ def _load_env(path: Path | None = None) -> None:
 _load_env()
 
 try:  # exécution comme package (uvicorn server.main:app)
-    from . import device, gemini
+    from . import device, gemini, saspay
 except ImportError:  # exécution depuis server/ (uvicorn main:app)
-    import device, gemini  # type: ignore[no-redef]
+    import device, gemini, saspay  # type: ignore[no-redef]
 
 app = FastAPI(title="DarkCodex API", version="2.0")
 
@@ -58,8 +62,7 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-FEDAPAY_TRANSACTIONS_URL = "https://api.fedapay.com/v1/transactions"
-FEDAPAY_OK_STATUSES = {"approved", "paid"}
+logger = logging.getLogger("darkcodex.server")
 DEVICE_PAGE = os.environ.get("DARKCODEX_DEVICE_URL", "https://darkcodex.onrender.com/device")
 
 
@@ -73,10 +76,12 @@ class ChatIn(BaseModel):
     historique: list[dict[str, Any]] | None = None
 
 
-class PaiementIn(BaseModel):
-    transaction_id: str
+class PaiementCreerIn(BaseModel):
     plan: str
-    user_id: str | None = None
+
+
+class PaiementIn(BaseModel):
+    session_id: str
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -234,74 +239,169 @@ def solde(authorization: str | None = Header(None)) -> dict[str, Any]:
     }
 
 
-# ── 7. Confirmation de paiement FedaPay ────────────────────────
+# ── 7. Paiements SasPay ────────────────────────────────────────
+#
+# Flux sûr : c'est LE SERVEUR qui fixe le montant (table plans) et qui lie la
+# session de paiement à l'utilisateur connecté. Le client ne peut donc ni
+# choisir un prix, ni réclamer le paiement d'un autre.
 
 
-def _transaction_fedapay(transaction_id: str) -> dict[str, Any]:
-    secret = os.environ.get("FEDAPAY_SECRET_KEY", "").strip()
-    if not secret:
-        raise RuntimeError("FEDAPAY_SECRET_KEY manquante.")
-    response = requests.get(
-        f"{FEDAPAY_TRANSACTIONS_URL}/{transaction_id}",
-        headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
-        timeout=20,
+@app.post("/paiement/creer")
+def paiement_creer(payload: PaiementCreerIn, authorization: str | None = Header(None)) -> Any:
+    session = _utilisateur(authorization)
+    user_id = session["user_id"]
+    try:
+        plan = device.lire_plan(payload.plan)
+    except Exception as exc:
+        return _erreur(exc)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan inconnu.")
+    tokens = int(plan.get("tokens") or 0)
+    prix = int(plan.get("prix_fcfa") or 0)
+    if prix <= 0 or tokens <= 0:
+        raise HTTPException(status_code=400, detail="Ce plan n'est pas payant.")
+    email = str(session.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Aucun email sur le compte.")
+    nom = str(session.get("nom") or "").strip() or email.split("@")[0] or "Client"
+
+    try:
+        checkout = saspay.creer_session(
+            montant=prix,
+            description=f"DarkCodex - plan {plan['nom']}",
+            email=email,
+            nom=nom,
+            return_url=os.environ.get("SASPAY_RETURN_URL", "").strip(),
+            metadata={"user_id": user_id, "plan": plan["nom"]},
+        )
+        device.creer_paiement(user_id, plan["nom"], tokens, prix, str(checkout["id"]))
+    except Exception as exc:
+        return _erreur(exc)
+
+    return {
+        "session_id": str(checkout["id"]),
+        "checkout_url": checkout["checkout_url"],
+        "montant": prix,
+        "devise": saspay.DEVISE,
+        "plan": plan["nom"],
+    }
+
+
+def _traiter_paiement(paiement: dict[str, Any]) -> dict[str, Any]:
+    """Vérifie auprès de SasPay puis crédite les tokens, UNE seule fois."""
+    session_id = str(paiement["session_id"])
+    user_id = str(paiement["user_id"])
+    plan = str(paiement["plan"])
+    tokens = int(paiement["tokens"])
+    prix = int(paiement["montant_fcfa"])
+
+    statut_local = str(paiement.get("statut") or "")
+    if statut_local == "credite":
+        return {"status": "deja_credite", "tokens_ajoutes": 0, "plan": plan}
+    if statut_local != "en_attente":
+        raise HTTPException(status_code=409, detail={"status": "paiement_bloque", "etat": statut_local})
+
+    # 1. L'état réel du paiement, revérifié par SasPay (jamais notre mémoire).
+    statut = saspay.statut_session(session_id)
+    if not saspay.est_paye(statut):
+        etat = str(statut.get("status") or "inconnu").lower()
+        raise HTTPException(status_code=402, detail={"status": "paiement_non_valide", "etat": etat})
+
+    # 2. Le montant, la devise et la commande doivent correspondre à ce qu'on a créé.
+    details = saspay.lire_session(session_id)
+    meta = details.get("metadata") if isinstance(details.get("metadata"), dict) else {}
+    coherent = (
+        saspay.meme_montant(details.get("amount"), prix)
+        and str(details.get("currency") or "").upper() == saspay.DEVISE
+        and (not meta.get("user_id") or str(meta["user_id"]) == user_id)
+        and (not meta.get("plan") or str(meta["plan"]) == plan)
     )
-    if not response.ok:
-        raise RuntimeError(f"FedaPay HTTP {response.status_code}")
-    data = response.json()
-    return data.get("transaction") if isinstance(data.get("transaction"), dict) else data
+    if not coherent:
+        logger.error("Paiement %s incohérent avec la commande (montant/devise/métadonnées).", session_id)
+        device.marquer_anomalie(session_id)
+        raise HTTPException(status_code=409, detail={"status": "paiement_incoherent"})
+
+    # 3. Réservation atomique : un seul appel gagne, les autres voient « déjà crédité ».
+    if not device.reserver_paiement(session_id):
+        return {"status": "deja_credite", "tokens_ajoutes": 0, "plan": plan}
+    try:
+        profil = device.crediter_profil(user_id, tokens, plan)
+    except Exception:
+        device.liberer_paiement(session_id)  # rien n'a été crédité : on pourra réessayer
+        raise
+    try:
+        device.enregistrer_achat(user_id, plan, tokens, prix, session_id)
+    except Exception:  # l'historique ne doit jamais annuler un crédit déjà fait
+        logger.exception("Achat %s crédité mais non enregistré dans achats.", session_id)
+
+    return {
+        "status": "confirme",
+        "plan": plan,
+        "tokens_ajoutes": tokens,
+        "tokens_solde": int(profil.get("tokens_solde") or 0),
+    }
 
 
 @app.post("/confirmer-paiement")
 def confirmer_paiement(payload: PaiementIn, authorization: str | None = Header(None)) -> Any:
     session = _utilisateur(authorization)
-    user_id = session["user_id"]
-    if payload.user_id and payload.user_id != user_id:
-        raise HTTPException(status_code=403, detail="user_id ne correspond pas au token.")
-
-    plan = device.lire_plan(payload.plan)
-    if not plan:
-        raise HTTPException(status_code=404, detail="Plan inconnu.")
-    tokens = int(plan.get("tokens") or 0)
-    prix = int(plan.get("prix_fcfa") or 0)
-
     try:
-        transaction = _transaction_fedapay(payload.transaction_id)
+        paiement = device.lire_paiement(payload.session_id.strip())
+    except Exception as exc:
+        return _erreur(exc)
+    # Même réponse si la session n'existe pas ou appartient à quelqu'un d'autre.
+    if not paiement or str(paiement.get("user_id")) != session["user_id"]:
+        raise HTTPException(status_code=404, detail="Paiement introuvable.")
+    try:
+        return _traiter_paiement(paiement)
+    except HTTPException:
+        raise
     except Exception as exc:
         return _erreur(exc)
 
-    statut = str(transaction.get("status") or "").lower()
-    if statut not in FEDAPAY_OK_STATUSES:
-        raise HTTPException(
-            status_code=402,
-            detail={"status": "paiement_non_valide", "etat": statut or "inconnu"},
-        )
 
+def _reconcilier() -> dict[str, Any]:
+    """Après un webhook : vérifie les paiements récents encore en attente."""
+    credites = 0
+    for paiement in device.paiements_en_attente(limite=5):
+        try:
+            resultat = _traiter_paiement(paiement)
+        except HTTPException:
+            continue  # pas encore payé, ou incohérent : déjà journalisé
+        except Exception:
+            logger.exception("Réconciliation du paiement %s échouée.", paiement.get("session_id"))
+            continue
+        if resultat.get("status") == "confirme":
+            credites += 1
+    return {"ok": True, "credites": credites}
+
+
+@app.post("/webhooks/saspay")
+async def webhook_saspay(request: Request) -> Any:
+    """Notification SasPay. La signature est contrôlée sur le corps BRUT ; le
+    contenu du webhook n'est qu'un déclencheur : l'état réel est revérifié."""
+    corps = await request.body()
     try:
-        profil = device.lire_profil(user_id) or {}
-        if device.deja_credite(payload.transaction_id):
-            return {
-                "status": "deja_credite",
-                "tokens_ajoutes": 0,
-                "tokens_solde": int(profil.get("tokens_solde") or 0),
-                "plan": profil.get("plan") or "gratuit",
-            }
-        nouveau_solde = int(profil.get("tokens_solde") or 0) + tokens
-        profil = device.maj_profil(
-            user_id, {"tokens_solde": nouveau_solde, "plan": payload.plan}
-        )
-        device.enregistrer_achat(
-            user_id, payload.plan, tokens, prix, payload.transaction_id
-        )
-    except Exception as exc:
+        secret = saspay.webhook_secret()
+    except saspay.SasPayError as exc:
         return _erreur(exc)
-
-    return {
-        "status": "confirme",
-        "plan": payload.plan,
-        "tokens_ajoutes": tokens,
-        "tokens_solde": int(profil.get("tokens_solde") or nouveau_solde),
-    }
+    if not saspay.verifier_signature(
+        corps,
+        request.headers.get("X-Webhook-Signature", ""),
+        request.headers.get("X-Webhook-Timestamp", ""),
+        secret,
+    ):
+        raise HTTPException(status_code=403, detail="Signature invalide.")
+    try:
+        evenement = json.loads(corps)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Corps JSON invalide.") from exc
+    if not isinstance(evenement, dict) or evenement.get("event") != "transaction.success":
+        return {"ok": True, "credites": 0}
+    try:
+        return await run_in_threadpool(_reconcilier)
+    except Exception as exc:
+        return _erreur(exc)  # 503 : SasPay réessaiera plus tard
 
 
 # ── Page web de confirmation ───────────────────────────────────

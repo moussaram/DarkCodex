@@ -48,7 +48,7 @@ def call(func, *args, **kwargs):
 class DeviceCodeTests(unittest.TestCase):
     def test_generer_code_format(self):
         code = srv_device.generer_code()
-        self.assertRegex(code, r"^DARK-[A-Z0-9]{4}$")
+        self.assertRegex(code, r"^DARK-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$")
 
     def test_endpoint_renvoie_code_lien_et_expiration(self):
         with mock.patch.object(srv_device, "nettoyer_codes_expires"), mock.patch.object(
@@ -71,7 +71,9 @@ class DeviceCodeTests(unittest.TestCase):
         self.assertEqual(data["status"], "en_attente")
 
         avec_token = {"confirme": True, "token": "jwt-demo", "expire_a": "2999-01-01T00:00:00+00:00"}
-        with mock.patch.object(srv_device, "_lire_code", return_value=avec_token), mock.patch.object(
+        with mock.patch.object(srv_device, "supprimer_code"), mock.patch.object(
+            srv_device, "_lire_code", return_value=avec_token
+        ), mock.patch.object(
             srv_device,
             "verifier_token",
             return_value={
@@ -527,9 +529,10 @@ class SupabaseRestTests(unittest.TestCase):
             ok = srv_device.confirmer_code("dark-4829", "u1", "jwt-demo")
 
         self.assertTrue(ok)
-        self.assertEqual(
-            patch.call_args.args[0],
-            "https://proj.supabase.co/rest/v1/device_codes?code=eq.DARK-4829",
+        self.assertTrue(
+            patch.call_args.args[0].startswith(
+                "https://proj.supabase.co/rest/v1/device_codes?code=eq.DARK-4829&confirme=eq.false&expire_a=gt."
+            )
         )
         self.assertEqual(
             patch.call_args.kwargs["json"], {"confirme": True, "user_id": "u1", "token": "jwt-demo"}

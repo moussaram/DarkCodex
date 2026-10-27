@@ -68,10 +68,14 @@ def expires_iso() -> str:
 # ── Codes device ───────────────────────────────────────────────
 
 
+ALPHABET_CODE = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # sans 0/O ni 1/I (évite les confusions)
+
+
 def generer_code() -> str:
-    """Format DARK-XXXX (4 chiffres/lettres majuscules)."""
-    alphabet = string.ascii_uppercase + string.digits
-    return "DARK-" + "".join(secrets.choice(alphabet) for _ in range(4))
+    """Format DARK-XXXX-XXXX (8 caractères, ~10^12 combinaisons)."""
+    def bloc() -> str:
+        return "".join(secrets.choice(ALPHABET_CODE) for _ in range(4))
+    return f"DARK-{bloc()}-{bloc()}"
 
 
 def sauvegarder_code(code: str) -> None:
@@ -157,6 +161,7 @@ def verifier_code(code: str) -> dict[str, Any]:
     if not session:
         return {"status": "expire"}
 
+    supprimer_code(code)  # usage unique : le jeton n'est livré qu'une seule fois
     return {
         "status": "confirme",
         "token": row.get("token"),
@@ -170,8 +175,15 @@ def verifier_code(code: str) -> dict[str, Any]:
 
 def confirmer_code(code: str, user_id: str, token: str) -> bool:
     response = requests.patch(
-        rest_url("device_codes", {"code": f"eq.{(code or '').strip().upper()}"}),
-        headers=service_headers(),
+        rest_url(
+            "device_codes",
+            {
+                "code": f"eq.{(code or '').strip().upper()}",
+                "confirme": "eq.false",
+                "expire_a": f"gt.{now_iso()}",
+            },
+        ),
+        headers=service_headers({"Prefer": "return=representation"}),
         json={"confirme": True, "user_id": user_id, "token": token},
         timeout=20,
     )

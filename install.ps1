@@ -17,7 +17,7 @@ function New-DarkCodexWrapper {
     $WrapperPath = Join-Path $BinDir "$Name.cmd"
     $Content = @"
 @echo off
-cd /d "$Root"
+set "PYTHONPATH=$Root;%PYTHONPATH%"
 python -m darkcodex %*
 "@
     Set-Content -LiteralPath $WrapperPath -Value $Content -Encoding ASCII

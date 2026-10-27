@@ -9,7 +9,7 @@ create_wrapper() {
   name="$1"
   cat > "$BIN_DIR/$name" <<EOF
 #!/data/data/com.termux/files/usr/bin/sh
-cd "$ROOT"
+export PYTHONPATH="$ROOT\${PYTHONPATH:+:\$PYTHONPATH}"
 exec python -m darkcodex "\$@"
 EOF
   chmod +x "$BIN_DIR/$name"

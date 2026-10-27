@@ -15,6 +15,7 @@ Endpoints :
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -52,6 +54,11 @@ try:  # exécution comme package (uvicorn server.main:app)
     from . import device, gemini, saspay
 except ImportError:  # exécution depuis server/ (uvicorn main:app)
     import device, gemini, saspay  # type: ignore[no-redef]
+
+try:  # la version du dépôt déployé = dernière version disponible
+    from darkcodex import __version__ as VERSION_DEPOT
+except ImportError:
+    VERSION_DEPOT = "0.0.0"
 
 app = FastAPI(title="DarkCodex API", version="2.0")
 
@@ -425,17 +432,84 @@ async def webhook_saspay(request: Request) -> Any:
         return _erreur(exc)  # 503 : SasPay réessaiera plus tard
 
 
-# ── Page web de confirmation ───────────────────────────────────
+# ── Pages du site, configuration publique, plans, version ──────
+
+PAGES = {
+    "/device": "device.html",
+    "/connexion": "connexion.html",
+    "/abonnements": "abonnements.html",
+    "/compte": "compte.html",
+    "/paiement/retour": "retour.html",
+}
 
 
-@app.get("/device", include_in_schema=False)
-def device_page() -> FileResponse:
-    page = WEB_DIR / "device.html"
+def _servir_page(nom_fichier: str) -> FileResponse:
+    page = WEB_DIR / nom_fichier
     if not page.exists():
-        raise HTTPException(status_code=404, detail="Page device introuvable.")
+        raise HTTPException(status_code=404, detail="Page introuvable.")
     return FileResponse(page, media_type="text/html; charset=utf-8")
+
+
+def _creer_route_page(nom_fichier: str):
+    def route() -> FileResponse:
+        return _servir_page(nom_fichier)
+    return route
+
+
+for _chemin, _fichier in PAGES.items():
+    app.add_api_route(_chemin, _creer_route_page(_fichier), methods=["GET"], include_in_schema=False)
+
+
+def _cle_publique_valide(cle: str) -> bool:
+    """Vrai seulement pour une clé « anon / publishable » (jamais service_role / secret)."""
+    if cle.startswith("sb_secret_"):
+        return False
+    if cle.startswith("sb_publishable_"):
+        return True
+    try:
+        charge = cle.split(".")[1]
+        charge += "=" * (-len(charge) % 4)
+        return json.loads(base64.urlsafe_b64decode(charge)).get("role") == "anon"
+    except (IndexError, ValueError):
+        return False
+
+
+@app.get("/config", include_in_schema=False)
+def config_publique() -> dict[str, str]:
+    """Valeurs publiques lues par les pages web (la clé anon est faite pour être publique)."""
+    url = os.environ.get("SUPABASE_URL", "").strip()
+    cle = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+    if not url or not cle:
+        raise HTTPException(status_code=503, detail="SUPABASE_URL / SUPABASE_ANON_KEY manquants.")
+    if not _cle_publique_valide(cle):
+        raise HTTPException(status_code=503, detail="SUPABASE_ANON_KEY doit être la clé anon (publique).")
+    return {"supabase_url": url, "supabase_anon_key": cle}
+
+
+@app.get("/plans")
+def plans() -> Any:
+    try:
+        return device.lister_plans()
+    except Exception as exc:
+        return _erreur(exc)
+
+
+@app.get("/version")
+def version() -> dict[str, str]:
+    return {
+        "latest": os.environ.get("DARKCODEX_LATEST_VERSION", "").strip() or VERSION_DEPOT,
+        "minimum": os.environ.get("DARKCODEX_MIN_VERSION", "").strip() or "0.0.0",
+        "url": os.environ.get("DARKCODEX_REPO_URL", "").strip()
+        or "https://github.com/moussaram/DarkCodex",
+        "notes": os.environ.get("DARKCODEX_RELEASE_NOTES", "").strip(),
+    }
 
 
 @app.get("/", include_in_schema=False)
 def racine() -> dict[str, Any]:
     return {"service": "DarkCodex API", "device": DEVICE_PAGE}
+
+
+# Fichiers statiques du site (auth.js, site.css) : à garder TOUT EN BAS du fichier.
+if WEB_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

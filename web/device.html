@@ -26,7 +26,7 @@
     <div class="msg" id="msg"></div>
   </main>
   <script type="module">
-    import { exigerConnexion, apiFetch } from "/static/auth.js";
+    import { exigerConnexion, apiFetch, getSupabase } from "/static/auth.js";
 
     const $ = (id) => document.getElementById(id);
 
@@ -51,11 +51,22 @@
     async function autoriser(code) {
       $("btn-autoriser").disabled = true;
       try {
-        const reponse = await apiFetch("/device/confirm", { method: "POST", body: JSON.stringify({ code }) });
+        const reponse = await apiFetch("/device/confirm", {
+          method: "POST",
+          body: JSON.stringify({
+            code,
+            token: session.access_token,
+            refresh_token: session.refresh_token,
+          }),
+        });
         const data = await reponse.json().catch(() => ({}));
         if (reponse.ok) {
           $("demande").classList.add("cache");
           message("Terminal connecté. Vous pouvez retourner dans votre terminal.", "ok");
+          // Le terminal garde la session : le navigateur oublie sa copie
+          // (scope "local" = ne révoque PAS la session côté serveur).
+          const supabase = await getSupabase();
+          await supabase.auth.signOut({ scope: "local" });
         } else {
           message(typeof data.detail === "string" ? data.detail : "Échec de l'autorisation.", "ko");
           $("btn-autoriser").disabled = false;

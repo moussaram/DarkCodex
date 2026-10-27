@@ -103,7 +103,7 @@ class DeviceCodeTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "confirme")
-        confirmer.assert_called_once_with("DARK-4829", "u1", "dkx_demo")
+        confirmer.assert_called_once_with("DARK-4829", "u1", "dkx_demo", None)
 
     def test_confirm_refuse_sans_token(self):
         payload = srv_main.DeviceConfirmIn(code="DARK-4829")
@@ -473,6 +473,113 @@ class WebhookRattrapageTests(unittest.TestCase):
             )
         self.assertEqual(status, 200)
         dernier.assert_not_called()
+
+
+class SessionRefreshTests(unittest.TestCase):
+    """Problème 3 : renouvellement automatique de la session du terminal."""
+
+    ENV = {"SUPABASE_URL": "https://proj.supabase.co", "SUPABASE_SERVICE_KEY": "service-secret"}
+
+    def test_api_call_session_renouvelle_puis_rejoue(self):
+        session = {"token": "vieux", "refresh_token": "r1"}
+        reponses = [
+            (401, {"detail": "Token invalide."}),
+            (200, {"access_token": "neuf", "refresh_token": "r2", "expires_in": 3600}),
+            (200, {"tokens_solde": 42}),
+        ]
+        with mock.patch.object(cli, "api_call", side_effect=reponses) as appel, mock.patch.object(
+            cli, "save_auth"
+        ) as sauve:
+            status, data = cli.api_call_session(session, "/solde")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["tokens_solde"], 42)
+        self.assertEqual(session["token"], "neuf")
+        self.assertEqual(session["refresh_token"], "r2")
+        self.assertEqual(appel.call_args_list[0].kwargs["token"], "vieux")
+        self.assertEqual(appel.call_args_list[2].kwargs["token"], "neuf")
+        sauve.assert_called_once()
+
+    def test_api_call_session_sans_refresh_un_seul_essai(self):
+        session = {"token": "vieux"}
+        with mock.patch.object(cli, "api_call", return_value=(401, {"detail": "x"})) as appel:
+            status, _ = cli.api_call_session(session, "/solde")
+        self.assertEqual(status, 401)
+        appel.assert_called_once()  # pas de boucle infinie : un seul essai
+
+    def test_api_call_session_refresh_refuse_renvoie_le_401(self):
+        session = {"token": "vieux", "refresh_token": "r1"}
+        reponses = [
+            (401, {"detail": "x"}),
+            (401, {"detail": "Session expirée."}),  # /auth/refresh refuse
+        ]
+        with mock.patch.object(cli, "api_call", side_effect=reponses) as appel:
+            status, _ = cli.api_call_session(session, "/solde")
+        self.assertEqual(status, 401)
+        self.assertEqual(appel.call_count, 2)  # essai initial + rafraîchissement raté
+        self.assertEqual(session["token"], "vieux")
+
+    def test_rafraichir_session_sans_refresh_token(self):
+        self.assertFalse(cli.rafraichir_session({"token": "t"}))
+
+    def test_auth_refresh_401_si_rafraichissement_refuse(self):
+        with mock.patch.object(srv_device, "rafraichir_session", return_value=None):
+            with self.assertRaises(srv_main.HTTPException) as ctx:
+                srv_main.auth_refresh(srv_main.RefreshIn(refresh_token="r1"))
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_auth_refresh_renvoie_les_deux_jetons(self):
+        nouvelle = {"access_token": "a2", "refresh_token": "r2", "expires_in": 3600}
+        with mock.patch.object(srv_device, "rafraichir_session", return_value=nouvelle) as raf:
+            data = srv_main.auth_refresh(srv_main.RefreshIn(refresh_token="r1"))
+        raf.assert_called_once_with("r1")
+        self.assertEqual((data["access_token"], data["refresh_token"]), ("a2", "r2"))
+
+    def test_verifier_code_renvoie_refresh_puis_code_supprime(self):
+        ligne = {
+            "code": "DARK-ABCD-EFGH",
+            "confirme": True,
+            "expire_a": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat(
+                timespec="seconds"
+            ),
+            "token": "dkx_abc",
+            "refresh_token": "r1",
+        }
+        profil = {"user_id": "u1", "email": "a@b.c", "nom": "Awa", "tokens_solde": 5, "plan": "gratuit"}
+        with mock.patch.object(srv_device, "_lire_code", return_value=ligne), mock.patch.object(
+            srv_device, "verifier_token", return_value=profil
+        ), mock.patch.object(srv_device, "supprimer_code", return_value=True) as suppr:
+            data = srv_device.verifier_code("DARK-ABCD-EFGH")
+        self.assertEqual(data["status"], "confirme")
+        self.assertEqual(data["refresh_token"], "r1")
+        suppr.assert_called_once_with("DARK-ABCD-EFGH")
+        # usage unique : deuxième lecture du même code
+        with mock.patch.object(srv_device, "_lire_code", return_value=None):
+            self.assertEqual(srv_device.verifier_code("DARK-ABCD-EFGH")["status"], "expire")
+
+    def test_confirmer_code_stoque_le_refresh_token(self):
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            srv_device.requests, "patch"
+        ) as patch:
+            patch.return_value.ok = True
+            patch.return_value.json.return_value = [{"confirme": True}]
+            srv_device.confirmer_code("DARK-ABCD-EFGH", "u1", "dkx_abc", "r1")
+        self.assertEqual(patch.call_args.kwargs["json"]["refresh_token"], "r1")
+
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            srv_device.requests, "patch"
+        ) as patch:
+            patch.return_value.ok = True
+            patch.return_value.json.return_value = [{"confirme": True}]
+            srv_device.confirmer_code("DARK-ABCD-EFGH", "u1", "dkx_abc")
+        self.assertNotIn("refresh_token", patch.call_args.kwargs["json"])
+
+    def test_device_html_envoie_refresh_token_et_oublie_sa_session(self):
+        html = (Path(__file__).resolve().parent.parent / "web" / "device.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("refresh_token: session.refresh_token", html)
+        self.assertIn('signOut({ scope: "local" })', html)
+        self.assertNotIn("signOut()", html)  # jamais le signOut global qui révoquerait le terminal
 
 
 class CliLoginTests(unittest.TestCase):

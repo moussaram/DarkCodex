@@ -700,11 +700,46 @@ def session_info(token: str) -> tuple[int, dict]:
     return api_call("/verify-token", token=token)
 
 
+def rafraichir_session(session: dict) -> bool:
+    """Renouvelle le jeton avec le refresh_token. Renvoie True si réussi."""
+    refresh = session.get("refresh_token")
+    if not refresh:
+        return False
+    status, data = api_call(
+        "/auth/refresh", method="POST", payload={"refresh_token": refresh}, timeout=30
+    )
+    if status != 200 or not data.get("access_token"):
+        return False
+    session["token"] = data["access_token"]
+    if data.get("refresh_token"):
+        session["refresh_token"] = data["refresh_token"]  # Supabase le change à chaque fois
+    save_auth(session)
+    return True
+
+
+def api_call_session(
+    session: dict,
+    path: str,
+    method: str = "GET",
+    payload: dict | None = None,
+    timeout: int = 60,
+) -> tuple[int, dict]:
+    """Comme api_call, mais renouvelle la session une fois si le serveur répond 401."""
+    status, data = api_call(
+        path, method=method, payload=payload, token=session.get("token"), timeout=timeout
+    )
+    if status == 401 and rafraichir_session(session):
+        status, data = api_call(
+            path, method=method, payload=payload, token=session.get("token"), timeout=timeout
+        )
+    return status, data
+
+
 def ensure_session(interactive: bool = True, announce: bool = True) -> dict | None:
     """1. auth.json ? 2. /verify-token ? 3. bienvenue. 4. sinon /login."""
     session = load_auth()
     if session:
-        status, data = session_info(session["token"])
+        status, data = api_call_session(session, "/verify-token")
         if status == 200:
             session.update(
                 {
@@ -805,6 +840,7 @@ def device_login() -> dict | None:
             if etat == "confirme":
                 session = {
                     "token": data.get("token", ""),
+                    "refresh_token": data.get("refresh_token", ""),
                     "email": data.get("email", ""),
                     "nom": data.get("nom", ""),
                     "tokens_solde": data.get("tokens_solde", 0),
@@ -838,7 +874,7 @@ def show_solde() -> None:
     if not session:
         print("Non connecté. Tapez /login")
         return
-    status, data = api_call("/solde", token=session["token"])
+    status, data = api_call_session(session, "/solde")
     if status == 401:
         clear_auth()
         print("Session expirée. Tapez /login")
@@ -892,8 +928,8 @@ def show_token_line(used: object, remaining: object) -> None:
 
 def server_answer(session: dict, prompt: str) -> tuple[int, str, dict]:
     """POST /chat. Retourne (0, reponse, donnees) ou (code_http, erreur, donnees)."""
-    status, data = api_call(
-        "/chat", method="POST", payload={"message": prompt}, token=session["token"], timeout=300
+    status, data = api_call_session(
+        session, "/chat", method="POST", payload={"message": prompt}, timeout=300
     )
     if status == 200:
         return 0, str(data.get("reponse") or ""), data
@@ -1375,7 +1411,7 @@ def commande_parrainer(line: str, session: dict | None) -> None:
         if len(morceaux) < 3:
             print("Usage : /parrainer utiliser DK-XXXXXX")
             return
-        status, data = api_call("/parrainage/utiliser", method="POST", payload={"code": morceaux[2]}, token=session["token"], timeout=30)
+        status, data = api_call_session(session, "/parrainage/utiliser", method="POST", payload={"code": morceaux[2]}, timeout=30)
         if status == 200:
             ajoutes = int(data.get("tokens_ajoutes") or 0)
             session["tokens_solde"] = int(session.get("tokens_solde") or 0) + ajoutes
@@ -1384,7 +1420,7 @@ def commande_parrainer(line: str, session: dict | None) -> None:
         else:
             print(f"⛔ {api_error_text(data)}")
         return
-    status, data = api_call("/parrainage", token=session["token"], timeout=30)
+    status, data = api_call_session(session, "/parrainage", timeout=30)
     if status != 200:
         print(f"⛔ {api_error_text(data)}")
         return

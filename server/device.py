@@ -165,6 +165,7 @@ def verifier_code(code: str) -> dict[str, Any]:
     return {
         "status": "confirme",
         "token": row.get("token"),
+        "refresh_token": row.get("refresh_token"),
         "user_id": session["user_id"],
         "email": session["email"],
         "nom": session["nom"],
@@ -173,7 +174,10 @@ def verifier_code(code: str) -> dict[str, Any]:
     }
 
 
-def confirmer_code(code: str, user_id: str, token: str) -> bool:
+def confirmer_code(code: str, user_id: str, token: str, refresh_token: str | None = None) -> bool:
+    corps: dict[str, Any] = {"confirme": True, "user_id": user_id, "token": token}
+    if refresh_token:
+        corps["refresh_token"] = refresh_token
     response = requests.patch(
         rest_url(
             "device_codes",
@@ -184,7 +188,7 @@ def confirmer_code(code: str, user_id: str, token: str) -> bool:
             },
         ),
         headers=service_headers({"Prefer": "return=representation"}),
-        json={"confirme": True, "user_id": user_id, "token": token},
+        json=corps,
         timeout=20,
     )
     if not response.ok:
@@ -224,6 +228,40 @@ def supprimer_code(code: str) -> bool:
     except requests.RequestException:
         return False
     return response.ok
+
+
+def rafraichir_session(refresh_token: str) -> dict[str, Any] | None:
+    """Échange un refresh_token Supabase contre un nouveau couple de jetons.
+
+    Renvoie None si le refresh_token est invalide ou expiré.
+    """
+    refresh_token = (refresh_token or "").strip()
+    if not refresh_token:
+        return None
+    # La clé anon est préférable ; à défaut on utilise la clé du serveur.
+    cle = os.environ.get("SUPABASE_ANON_KEY", "").strip() or service_key()
+    try:
+        response = requests.post(
+            f"{supabase_url()}/auth/v1/token",
+            params={"grant_type": "refresh_token"},
+            headers={"apikey": cle, "Content-Type": "application/json"},
+            json={"refresh_token": refresh_token},
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Supabase auth injoignable: {exc}") from exc
+    if response.status_code in (400, 401, 403):
+        return None
+    if not response.ok:
+        raise RuntimeError(f"Supabase auth (refresh): HTTP {response.status_code}")
+    data = response.json()
+    if not data.get("access_token") or not data.get("refresh_token"):
+        return None
+    return {
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
+        "expires_in": int(data.get("expires_in") or 3600),
+    }
 
 
 # ── Appareils : jetons longue durée (table « appareils ») ───────

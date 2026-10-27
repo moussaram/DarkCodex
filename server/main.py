@@ -81,6 +81,11 @@ RECONCILIATION_SECONDES = int(os.environ.get("DARKCODEX_RECONCILIATION_SECONDS",
 class DeviceConfirmIn(BaseModel):
     code: str
     token: str | None = None
+    refresh_token: str | None = None
+
+
+class RefreshIn(BaseModel):
+    refresh_token: str
 
 
 class ChatIn(BaseModel):
@@ -167,7 +172,9 @@ def device_confirm(payload: DeviceConfirmIn, authorization: str | None = Header(
         # Le terminal reçoit son PROPRE jeton longue durée, jamais le jeton du navigateur.
         jeton_appareil = device.creer_appareil(session["user_id"], session["email"], session["nom"])
         try:
-            ok = device.confirmer_code(payload.code, session["user_id"], jeton_appareil)
+            ok = device.confirmer_code(
+                payload.code, session["user_id"], jeton_appareil, payload.refresh_token
+            )
         except Exception:
             device.revoquer_appareil(jeton_appareil)
             raise
@@ -194,6 +201,18 @@ def logout(authorization: str | None = Header(None)) -> Any:
         return {"revoque": device.revoquer_appareil(token)}
     except Exception as exc:
         return _erreur(exc)
+
+
+@app.post("/auth/refresh")
+def auth_refresh(payload: RefreshIn) -> Any:
+    """Renouvelle la session Supabase du terminal (jeton d'accès ~1 h)."""
+    try:
+        nouvelle = device.rafraichir_session(payload.refresh_token)
+    except Exception as exc:  # noqa: BLE001
+        return _erreur(exc)
+    if not nouvelle:
+        raise HTTPException(status_code=401, detail="Session expirée. Reconnectez-vous avec /login.")
+    return nouvelle
 
 
 # ── 4. Vérifier le token au lancement ──────────────────────────

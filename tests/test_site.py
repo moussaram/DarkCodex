@@ -88,7 +88,7 @@ class RoutesTests(unittest.TestCase):
             reponse = self.client.post("/device/confirm", json={"code": "DARK-AAAA-BBBB"}, headers=self.entetes)
 
         self.assertEqual(reponse.status_code, 200)
-        confirmer.assert_called_once_with("DARK-AAAA-BBBB", "u1", "dkx_nouveau")
+        confirmer.assert_called_once_with("DARK-AAAA-BBBB", "u1", "dkx_nouveau", None)
 
     def test_code_inconnu_ne_cree_aucun_appareil(self):
         with mock.patch.object(srv_device, "verifier_token", return_value=SESSION), mock.patch.object(

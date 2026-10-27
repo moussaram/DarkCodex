@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mon compte — DarkCodex</title>
+  <link rel="stylesheet" href="/static/site.css">
+</head>
+<body>
+  <main>
+    <h1>Mon compte</h1>
+    <div class="carte">
+      <p>Email : <strong id="email"></strong></p>
+      <p>Plan : <strong id="plan"></strong></p>
+      <p>Tokens restants : <strong id="solde"></strong> <span class="doux">(utilisés : <span id="utilises"></span>)</span></p>
+      <p><a class="bouton" href="/abonnements">Acheter des tokens</a> <button type="button" class="secondaire" id="btn-quitter">Se déconnecter du site</button></p>
+    </div>
+    <div class="msg" id="msg"></div>
+  </main>
+  <script type="module">
+    import { exigerConnexion, apiFetch, deconnexion } from "/static/auth.js";
+
+    const $ = (id) => document.getElementById(id);
+
+    const nombre = (n) => Number(n).toLocaleString("fr-FR");
+
+    const session = await exigerConnexion();
+
+    if (session) {
+      $("email").textContent = session.user.email;
+
+      try {
+        const reponse = await apiFetch("/solde");
+        const data = await reponse.json();
+        if (!reponse.ok) throw new Error("solde");
+
+        $("plan").textContent = data.plan;
+        $("solde").textContent = nombre(data.tokens_solde);
+        $("utilises").textContent = nombre(data.tokens_utilises);
+      } catch (erreur) { const m = $("msg"); m.textContent = "Impossible de lire le solde."; m.className = "msg ko"; }
+
+      $("btn-quitter").addEventListener("click", async () => { await deconnexion(); location.replace("/connexion"); });
+    }
+  </script>
+</body>
+</html>

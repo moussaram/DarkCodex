@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Retour de paiement — DarkCodex</title>
+  <link rel="stylesheet" href="/static/site.css">
+</head>
+<body>
+  <main>
+    <h1>Paiement</h1>
+    <div class="msg ok" id="msg">Vérification de votre paiement…</div>
+    <p><a class="bouton" href="/compte">Voir mon compte</a></p>
+  </main>
+  <script type="module">
+    import { exigerConnexion, apiFetch } from "/static/auth.js";
+
+    const $ = (id) => document.getElementById(id);
+
+    const ATTENTE = ["pending", "processing", "created", "initiated", "open", "inconnu"];
+
+    const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    function message(texte, type) { const m = $("msg"); m.textContent = texte; m.className = "msg " + type; }
+
+    const session = await exigerConnexion();
+
+    if (session) {
+      const id = localStorage.getItem("dk_paiement");
+
+      if (!id) message("Aucun paiement en cours.", "ko");
+      else {
+        let fini = false;
+        for (let essai = 0; essai < 12 && !fini; essai++) {
+          const reponse = await apiFetch("/confirmer-paiement", { method: "POST", body: JSON.stringify({ session_id: id }) });
+          const data = await reponse.json().catch(() => ({}));
+          const detail = data.detail && typeof data.detail === "object" ? data.detail : {};
+
+          if (reponse.ok && (data.status === "confirme" || data.status === "deja_credite")) {
+            localStorage.removeItem("dk_paiement");
+            message(data.status === "confirme" ? "Paiement confirmé : " + Number(data.tokens_ajoutes).toLocaleString("fr-FR") + " tokens ajoutés à votre compte." : "Ce paiement a déjà été crédité.", "ok");
+            fini = true;
+          } else if (reponse.status === 402 && ATTENTE.includes(String(detail.etat))) await pause(3000);
+          else {
+            message(reponse.status === 402 ? "Le paiement n'a pas abouti (état : " + detail.etat + ")." : (typeof data.detail === "string" ? data.detail : "Vérification impossible pour le moment."), "ko");
+            fini = true;
+          }
+        }
+        if (!fini) message("Paiement en cours de vérification : votre solde sera mis à jour automatiquement dans quelques minutes.", "ok");
+      }
+    }
+  </script>
+</body>
+</html>

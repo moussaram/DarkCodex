@@ -17,7 +17,6 @@ a = Analysis(
         "urllib.parse",
         "darkcodex.agent_fichiers",
         "darkcodex.langues",
-        "darkcodex.licence",
         "darkcodex.memory",
         "darkcodex.security",
     ],

@@ -238,7 +238,7 @@ def detect_framework(root: Path) -> str:
 
 
 def detect_base(root: Path) -> str:
-    for nom in ("requirements.txt", "package.json", "pyproject.toml", ".env.example", "supabase_licences.sql"):
+    for nom in ("requirements.txt", "package.json", "pyproject.toml", ".env.example"):
         texte = _lire_texte(root, nom, 8000).lower()
         for marqueur, label in (("supabase", "Supabase"), ("postgres", "PostgreSQL"), ("sqlite", "SQLite"), ("mysql", "MySQL"), ("mongodb", "MongoDB"), ("redis", "Redis")):
             if marqueur in texte:

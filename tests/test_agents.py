@@ -97,7 +97,6 @@ class ModeTests(unittest.TestCase):
             mock.patch.object(cli, "AUTH_PATH", state / "auth.json"),
             mock.patch.object(cli, "HANDSHAKE_PATH", state / "handshake.json"),
             mock.patch.object(cli, "CONFIG_PATH", state / "config.json"),
-            mock.patch("darkcodex.licence.DATA_PATH", state / "data.json"),
         ]
         for patcher in self.patches:
             patcher.start()

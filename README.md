@@ -65,12 +65,8 @@ En chat:
 /run python -m pytest
 /config
 /status
-/activate
 /exit
 ```
-
-`/activate` enregistre ta cle Pro : la cle n'est activee qu'apres confirmation du
-paiement par Moov Money (voir section Freemium).
 
 ## Configuration API
 
@@ -85,26 +81,22 @@ Alternatives:
 
 ```sh
 export DARKCODEX_API_KEY="ta_cle_gemini"
-export DARKCODEX_SUPABASE_URL="https://ton-projet.supabase.co"
-export DARKCODEX_SUPABASE_ANON_KEY="ta_cle_anon"
-export DARKCODEX_SUPABASE_SERVICE_KEY="ta_cle_service_role"
 ```
 
-La cle `DARKCODEX_SUPABASE_SERVICE_KEY` sert uniquement au script local `generer_cle.py`.
+## Abonnement
 
-## Freemium
+DarkCodex fonctionne uniquement avec le serveur central et les comptes : pas de cle
+Pro, pas de limite locale. Sans connexion, le terminal demande `/login`.
 
-- Mode gratuit: 20 requetes par jour.
-- Mode Pro: illimite apres activation d'une licence valide.
-- La cle est activee uniquement apres confirmation du paiement par Moov Money.
-- Donnees locales Freemium: `~/.darkcodex_data.json`.
-- SQL Supabase: executer `supabase_licences.sql` dans le SQL Editor Supabase.
-
-Generer une cle Pro apres paiement:
-
-```sh
-python generer_cle.py
-```
+1. `/login` demande un code `DARK-XXXX` : connexion sur la page `/device` (Google ou
+   lien email), puis le terminal recoit son jeton.
+2. Au lancement, le terminal lit le solde avec `GET /verify-token`.
+3. Chaque message passe par `POST /chat` : le serveur verifie que le solde est superieur
+   a 0, appelle Gemini, puis retire les tokens utilises.
+4. Solde a 0 : reponse 402, le terminal affiche les plans et le lien `/abonnements`.
+5. Sur `/abonnements`, l'achat d'un pack (starter : 50 000 tokens = 500 FCFA ;
+   pro : 500 000 tokens = 2 500 FCFA) se paie via SasPay. Le webhook
+   `/webhooks/saspay` ou le retour sur la page crédite les tokens une seule fois.
 
 ## Donnees locales
 
@@ -113,7 +105,6 @@ La configuration et la base SQLite sont dans:
 ```text
 ~/.darkcodex/config.json
 ~/.darkcodex/darkcodex.sqlite
-~/.darkcodex_data.json
 ```
 
 Tu peux changer l'emplacement avec:

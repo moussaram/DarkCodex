@@ -27,7 +27,6 @@ from . import (
     cout,
     historique,
     langues,
-    licence,
     memory,
     navigateur,
     updater,
@@ -611,6 +610,16 @@ def plan_label(plan: object) -> str:
     return str(plan or "gratuit").capitalize()
 
 
+MESSAGE_CONNEXION_REQUISE = "Connexion requise : tape /login pour utiliser DarkCodex."
+
+
+def statut_compte(session: dict | None) -> str:
+    """Texte du compte affiché à la place de l'ancien statut Pro local."""
+    if not session:
+        return "Non connecté — tape /login"
+    return f"Plan {plan_label(session.get('plan'))} — {fmt_tokens(session.get('tokens_solde'))} tokens"
+
+
 def load_auth() -> dict | None:
     data = read_auth_file()
     if data.get("token"):
@@ -963,13 +972,8 @@ def ai_answer(provider: str, prompt: str, config: dict, cwd: Path) -> tuple[int,
     ok_cout, message_cout = cout.SESSION.verifier(cout.estimer_tokens(prompt))
     if not ok_cout:
         return 1, message_cout
-    allowed, limit_message = licence.consume_request()
-    if not allowed:
-        return 1, limit_message
-    code, output = run_provider(provider, prompt, config, cwd)
-    if code == 0:
-        cout.SESSION.ajouter_estimation(prompt, output)
-    return code, output
+    # Sans connexion, plus aucun appel local à un fournisseur : on demande /login.
+    return 1, MESSAGE_CONNEXION_REQUISE
 
 
 # ── Modes d'autorisation de l'agent (Partie 1) ────────────
@@ -1240,11 +1244,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
         tokens_used = data.get("tokens_utilises")
         tokens_left = data.get("solde_restant")
     else:
-        allowed, limit_message = licence.consume_request()
-        if not allowed:
-            print(limit_message)
-            return 1
-        code, output = run_provider(provider, prompt, config, cwd)
+        print(MESSAGE_CONNEXION_REQUISE, file=sys.stderr)
+        return 1
 
     meta = {
         "commande": "ask",
@@ -1477,11 +1478,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     print(memory.startup_message())
     print(langues.format_startup())
     print(f" {C_BOLD}STATUS:{C_END} {C_GREEN}ONLINE{C_END} | {C_BOLD}ENGINE:{C_END} {C_MAGENTA}{provider.upper()}{C_END} | {C_BOLD}PATH:{C_END} {C_CYAN}{cwd}{C_END}")
-    mode = (
-        f"Plan {plan_label(session.get('plan'))} - {fmt_tokens(session.get('tokens_solde'))} tokens"
-        if session
-        else licence.status_text(refresh=True)
-    )
+    mode = statut_compte(session)
     print(f" {C_BOLD}PLAN:{C_END} {C_GREEN}{mode}{C_END}")
     print(f" {C_BOLD}AGENT:{C_END} {C_GREEN}{ctx.mode.upper()}{C_END} | {MODE_LABELS[ctx.mode]}")
     if ctx.rules():
@@ -1580,7 +1577,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
             print(f"  {C_CYAN}/session resume [nom]{C_END}     → reprendre une session")
             print(f"  {C_CYAN}/init{C_END}                     → générer AGENTS.md")
             print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ COMPTE ━━━━━━━━━━━━━━━━━━━━━━━{C_END}")
-            print(f"  {C_CYAN}/login | /logout | /solde | /plans | /status | /activate{C_END}")
+            print(f"  {C_CYAN}/login | /logout | /solde | /plans | /status{C_END}")
             print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ HISTORIQUE & COÛT ━━━━━━━━━━━━{C_END}")
             print(f" {C_CYAN}/historique{C_END} → dernières modifications de fichiers")
             print(f" {C_CYAN}/annuler{C_END} → annuler la dernière modification")
@@ -1602,7 +1599,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
             if session:
                 show_solde()
             else:
-                print(f"\n{C_GREEN}{licence.status_text(refresh=True)}{C_END}\n")
+                print(f"\n{C_GREEN}{statut_compte(session)}{C_END}\n")
             continue
         if line == "/login":
             nouvelle_session = device_login()
@@ -1649,30 +1646,17 @@ def cmd_chat(args: argparse.Namespace) -> int:
             continue
         if handle_file_agent_command(line, cwd, provider, config):
             continue
-        if line == "/activate":
-            license_key = input(f"{C_BOLD}{C_MAGENTA}Clé Pro: {C_END}").strip()
-            ok, message = licence.activate_license(license_key)
-            color = C_GREEN if ok else C_RED
-            print(f"\n{color}{message}{C_END}\n")
-            if ok:
-                print(
-                    f"{C_YELLOW}ℹ️ Après confirmation du paiement, ta clé Pro sera "
-                    "activée automatiquement dans DarkCodex.{C_END}\n"
-                )
-            continue
         if line == "/clear":
             print("\033[H\033[J", end="")
             print(BANNER)
             print(f" {C_BOLD}STATUS:{C_END} {C_GREEN}ONLINE{C_END} | {C_BOLD}ENGINE:{C_END} {C_MAGENTA}{provider.upper()}{C_END}")
-            print(f" {C_BOLD}MODE:{C_END} {C_GREEN}{licence.status_text(refresh=True)}{C_END}")
+            print(f" {C_BOLD}MODE:{C_END} {C_GREEN}{statut_compte(session)}{C_END}")
             print(f"{C_CYAN}=" * 60 + f"{C_END}\n")
             continue
         # AI Response Area
         if not session:
-            allowed, limit_message = licence.consume_request()
-            if not allowed:
-                print(f"\n{C_RED}{limit_message}{C_END}\n")
-                continue
+            print(f"\n{C_RED}{MESSAGE_CONNEXION_REQUISE}{C_END}\n")
+            continue
         ok_cout, message_cout = cout.SESSION.verifier(cout.estimer_tokens(line), confirmer=False)
         if not ok_cout:
             print(f"\n{C_RED}{message_cout}{C_END}\n")

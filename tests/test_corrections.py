@@ -5,7 +5,6 @@ mockés. Chaque classe couvre une correction (C01 → C15).
 """
 
 import contextlib
-import importlib
 import io
 import json
 import os
@@ -23,7 +22,6 @@ from darkcodex import (
     agent_tests,
     cli,
     fsutil,
-    licence,
     memory,
 )
 
@@ -65,14 +63,6 @@ class VersionEtAtomiqueTests(unittest.TestCase):
                 cli.save_config({"provider": "local"})
             self.assertFalse(list(Path(tmp).glob("*.tmp")))
 
-    def test_licence_save_data_atomique_et_600(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            chemin = Path(tmp) / "data.json"
-            licence.save_data(licence.default_data(), chemin)
-            self.assertTrue(chemin.exists())
-            self.assertEqual(chemin.stat().st_mode & 0o777, 0o600)
-            self.assertFalse(list(Path(tmp).glob("*.tmp")))
-
 
 # ── C02 : installateur qui vérifie ──────────────────────────────
 
@@ -99,7 +89,6 @@ class ModeSecuriseTests(unittest.TestCase):
             mock.patch.object(cli, "AUTH_PATH", etat / "auth.json"),
             mock.patch.object(cli, "HANDSHAKE_PATH", etat / "handshake.json"),
             mock.patch.object(cli, "CONFIG_PATH", etat / "config.json"),
-            mock.patch("darkcodex.licence.DATA_PATH", etat / "data.json"),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -560,7 +549,6 @@ class ChatCommandesTests(unittest.TestCase):
                     mock.patch.object(cli.langues, "format_startup", return_value=""), \
                     mock.patch.object(cli.memory, "startup_message", return_value=""), \
                     mock.patch.object(cli, "DB_PATH", racine / "db.sqlite"), \
-                    mock.patch("darkcodex.licence.DATA_PATH", racine / "data.json"), \
                     mock.patch("builtins.input", side_effect=['/ask "explique ce projet"', "/exit"]), \
                     contextlib.redirect_stdout(io.StringIO()) as sortie:
                 code = cli.cmd_chat(args)
@@ -582,7 +570,6 @@ class ChatCommandesTests(unittest.TestCase):
                     mock.patch.object(cli.memory, "startup_message", return_value=""), \
                     mock.patch.object(cli, "DB_PATH", racine / "db.sqlite"), \
                     mock.patch.object(cli, "CONFIG_PATH", racine / "config.json"), \
-                    mock.patch("darkcodex.licence.DATA_PATH", racine / "data.json"), \
                     mock.patch("builtins.input", side_effect=["/config", "/exit"]), \
                     contextlib.redirect_stdout(io.StringIO()) as sortie:
                 cli.cmd_chat(args)
@@ -661,7 +648,6 @@ class HandshakeTests(unittest.TestCase):
             mock.patch.object(cli, "AUTH_PATH", etat / "auth.json"),
             mock.patch.object(cli, "HANDSHAKE_PATH", etat / "handshake.json"),
             mock.patch.object(cli, "CONFIG_PATH", etat / "config.json"),
-            mock.patch("darkcodex.licence.DATA_PATH", etat / "data.json"),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -732,38 +718,21 @@ class HandshakeTests(unittest.TestCase):
 # ── C14 : message après paiement ────────────────────────────────
 
 class PaiementTests(unittest.TestCase):
-    def test_message_apres_paiement_dans_le_cli(self):
+    def test_message_de_recharge_dans_le_cli(self):
         source = (SRC / "cli.py").read_text(encoding="utf-8")
-        self.assertIn("Après confirmation du paiement", source)
+        self.assertIn("Rechargez votre compte", source)
+        self.assertIn("/abonnements", source)
 
-    def test_message_apres_paiement_dans_le_readme(self):
+    def test_readme_decrit_le_flux_dabonnement(self):
         contenu = (Path(cli.__file__).parents[1] / "README.md").read_text(encoding="utf-8")
-        self.assertIn("confirmation du paiement par Moov Money", contenu)
+        self.assertIn("## Abonnement", contenu)
+        self.assertNotIn("Moov Money", contenu)
+        self.assertNotIn("/activate", contenu)
 
 
 # ── C15 : .env maîtrisé ─────────────────────────────────────────
 
 class DotenvTests(unittest.TestCase):
-    def test_licence_ne_charge_dotenv_sans_flag(self):
-        faux = mock.MagicMock()
-        environ = {k: v for k, v in os.environ.items() if k != "DARKCODEX_LOAD_DOTENV"}
-        with mock.patch.dict(sys.modules, {"dotenv": faux}), mock.patch.dict(
-            os.environ, environ, clear=True
-        ):
-            importlib.reload(licence)
-        faux.load_dotenv.assert_not_called()
-        importlib.reload(licence)
-
-    def test_licence_charge_dotenv_avec_flag(self):
-        faux = mock.MagicMock()
-        environ = {**os.environ, "DARKCODEX_LOAD_DOTENV": "1"}
-        with mock.patch.dict(sys.modules, {"dotenv": faux}), mock.patch.dict(
-            os.environ, environ, clear=True
-        ):
-            importlib.reload(licence)
-        faux.load_dotenv.assert_called_once()
-        importlib.reload(licence)
-
     def test_ensure_dotenv_ne_crash_pas_sans_dotenv(self):
         cli._DOTENV_CHARGE = False
         try:

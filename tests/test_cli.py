@@ -6,7 +6,7 @@ from pathlib import Path
 
 from darkcodex.cli import Store, config_timeout, darkcodex_api_answer, project_files
 from darkcodex import agent_fichiers, langues, memory, security
-from darkcodex import licence
+from darkcodex import cli
 
 
 class StoreTests(unittest.TestCase):
@@ -63,37 +63,26 @@ class ApiProviderTests(unittest.TestCase):
         self.assertTrue(request.headers["X-goog-api-key"])
 
 
-class LicenceTests(unittest.TestCase):
-    def test_free_limit_blocks_after_twenty_requests(self):
+class ConnexionRequiseTests(unittest.TestCase):
+    """Problème 4 : sans connexion, plus aucun appel local à un fournisseur."""
+
+    def test_requete_sans_session_demande_login_sans_appeler_un_fournisseur(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_path = Path(tmp) / "data.json"
-            with mock.patch("darkcodex.licence.verify_license", return_value=(False, "")):
-                for _ in range(licence.FREE_DAILY_LIMIT):
-                    allowed, message = licence.consume_request(data_path)
-                    self.assertTrue(allowed)
-                    self.assertEqual(message, "")
-                allowed, message = licence.consume_request(data_path)
+            with mock.patch.object(cli, "AUTH_PATH", Path(tmp) / "auth.json"), mock.patch.object(
+                cli.cout, "SESSION", mock.Mock(verifier=mock.Mock(return_value=(True, "")))
+            ), mock.patch.object(cli, "run_provider", return_value=(0, "sortie locale")) as fournisseur:
+                code, message = cli.ai_answer("local", "bonjour", {}, Path(tmp))
 
-        self.assertFalse(allowed)
-        self.assertIn("Limite gratuite atteinte (20/20)", message)
+        self.assertEqual(code, 1)
+        self.assertEqual(message, cli.MESSAGE_CONNEXION_REQUISE)
+        fournisseur.assert_not_called()
 
-    def test_activate_license_saves_pro_status(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            data_path = Path(tmp) / "data.json"
-            with mock.patch("darkcodex.licence.verify_license", return_value=(True, "client@example.com")):
-                ok, message = licence.activate_license("DARK-ABCD-1234-WXYZ", data_path)
-                status = licence.status_text(data_path)
-
-        self.assertTrue(ok)
-        self.assertIn("Licence Pro activee", message)
-        self.assertIn("PRO illimite", status)
-
-    def test_verify_license_without_supabase_key_fails_closed(self):
-        with mock.patch("darkcodex.licence.SUPABASE_ANON_KEY", ""):
-            active, email = licence.verify_license("DARK-ABCD-1234-WXYZ")
-
-        self.assertFalse(active)
-        self.assertEqual(email, "")
+    def test_statut_compte(self):
+        self.assertEqual(cli.statut_compte(None), "Non connecté — tape /login")
+        self.assertEqual(
+            cli.statut_compte({"plan": "pro", "tokens_solde": 1200}),
+            "Plan Pro — 1 200 tokens",
+        )
 
 
 class PersistentMemoryTests(unittest.TestCase):

@@ -28,6 +28,7 @@ from . import (
     licence,
     memory,
     navigateur,
+    updater,
 )
 from .fsutil import atomic_write_text
 
@@ -2015,6 +2016,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if provider != "local" else 1
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    return updater.mettre_a_jour_maintenant(API_BASE, __version__)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="darkcodex", description="DarkCodex terminal coding assistant.")
     parser.add_argument("--version", action="version", version=f"DarkCodex {__version__}")
@@ -2068,6 +2073,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     handshake = sub.add_parser("handshake", help="Write and validate the local handshake file.")
     handshake.set_defaults(func=cmd_handshake)
+
+    update = sub.add_parser("update", help="Check for a new version of DarkCodex and install it.")
+    update.set_defaults(func=cmd_update)
     return parser
 
 
@@ -2078,4 +2086,6 @@ def main(argv: list[str] | None = None) -> int:
         argv = ["chat"]
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command in ("chat", "ask"):
+        updater.verifier_au_lancement(API_BASE, __version__)
     return int(args.func(args) or 0)

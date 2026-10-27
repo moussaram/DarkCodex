@@ -1310,6 +1310,100 @@ def handle_file_agent_command(line: str, cwd: Path, provider: str, config: dict)
     return True
 
 
+def commande_historique(cwd: Path) -> None:
+    print(historique.formater(historique.lister(cwd, limite=10)))
+
+
+def commande_annuler(cwd: Path) -> None:
+    entree = historique.prochaine_annulation(cwd)
+    if entree is None:
+        print("Rien à annuler.")
+        return
+    action = "restaurer" if entree.get("existait") else "supprimer le fichier créé"
+    if not confirm_user(f"Annuler la dernière modification ({action} : {entree['chemin']}) ?"):
+        print("Annulation abandonnée.")
+        return
+    ok, message = historique.annuler(cwd)
+    print(("✅ " if ok else "⛔ ") + message)
+
+
+def commande_diff(line: str, cwd: Path) -> None:
+    fichier = line.removeprefix("/diff").strip() or None
+    ok, texte = historique.diff_derniere(cwd, fichier)
+    print(historique.colorier_diff(texte) if ok else texte)
+
+
+def commande_cout(session: dict | None) -> None:
+    suivi = cout.SESSION
+    lignes = ["💰 Coût de la session", f"Tokens utilisés (mesurés) : {fmt_tokens(suivi.utilises)}"]
+    if suivi.estimes:
+        lignes.append(f"Tokens estimés (mode local) : ~{fmt_tokens(suivi.estimes)}")
+    lignes.append("Limite de session : " + (fmt_tokens(suivi.limite) if suivi.limite else "aucune"))
+    lignes.append(f"Confirmation au-delà de : ~{fmt_tokens(suivi.seuil)} tokens par demande")
+    if session:
+        lignes.append(f"Solde du compte : {fmt_tokens(session.get('tokens_solde'))}")
+    print(box(*lignes))
+
+
+def commande_limite(line: str) -> None:
+    valeur = line.removeprefix("/limite").strip()
+    if not valeur:
+        limite = cout.SESSION.limite
+        print(f"Limite de session : {fmt_tokens(limite)} tokens." if limite else "Aucune limite de session. Exemple : /limite 20000")
+        return
+    print(cout.SESSION.definir_limite(valeur)[1])
+
+
+def commande_parrainer(line: str, session: dict | None) -> None:
+    if not session:
+        print("Connecte-toi d'abord avec /login.")
+        return
+    morceaux = line.split()
+    if len(morceaux) >= 2 and morceaux[1].lower() == "utiliser":
+        if len(morceaux) < 3:
+            print("Usage : /parrainer utiliser DK-XXXXXX")
+            return
+        status, data = api_call("/parrainage/utiliser", method="POST", payload={"code": morceaux[2]}, token=session["token"], timeout=30)
+        if status == 200:
+            ajoutes = int(data.get("tokens_ajoutes") or 0)
+            session["tokens_solde"] = int(session.get("tokens_solde") or 0) + ajoutes
+            save_auth(session)
+            print(f"✅ Code accepté : +{fmt_tokens(ajoutes)} tokens pour toi et pour ton parrain !")
+        else:
+            print(f"⛔ {api_error_text(data)}")
+        return
+    status, data = api_call("/parrainage", token=session["token"], timeout=30)
+    if status != 200:
+        print(f"⛔ {api_error_text(data)}")
+        return
+    print(box(
+        "🎁 Parrainage",
+        f"Ton code : {data.get('code')}",
+        f"Chaque filleul : +{fmt_tokens(data.get('bonus'))} tokens pour lui ET pour toi",
+        f"Filleuls : {data.get('filleuls', 0)} | Tokens gagnés : {fmt_tokens(data.get('tokens_gagnes'))}",
+        f"Ton ami tape : /parrainer utiliser {data.get('code')}",
+    ))
+
+
+def handle_nouvelles_commandes(line: str, cwd: Path, session: dict | None) -> bool:
+    commande = line.split(" ", 1)[0]
+    if commande == "/historique":
+        commande_historique(cwd)
+    elif commande == "/annuler":
+        commande_annuler(cwd)
+    elif commande == "/diff":
+        commande_diff(line, cwd)
+    elif commande == "/cout":
+        commande_cout(session)
+    elif commande == "/limite":
+        commande_limite(line)
+    elif commande == "/parrainer":
+        commande_parrainer(line, session)
+    else:
+        return False
+    return True
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     ensure_dotenv()  # C15
     config = load_config()
@@ -1366,6 +1460,13 @@ def cmd_chat(args: argparse.Namespace) -> int:
             continue
         if line in {"/exit", "/quit"}:
             return 0
+        if line == "/dicter":
+            texte_dicte = voix.dicter_et_valider()
+            if not texte_dicte:
+                continue
+            line = texte_dicte  # le texte dicté est traité comme s'il avait été tapé
+        if handle_nouvelles_commandes(line, cwd, session):
+            continue
         if line == "/mode" or line.startswith("/mode "):
             commander_mode(line, ctx)
             continue
@@ -1432,6 +1533,14 @@ def cmd_chat(args: argparse.Namespace) -> int:
             print(f"  {C_CYAN}/init{C_END}                     → générer AGENTS.md")
             print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ COMPTE ━━━━━━━━━━━━━━━━━━━━━━━{C_END}")
             print(f"  {C_CYAN}/login | /logout | /solde | /plans | /status | /activate{C_END}")
+            print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ HISTORIQUE & COÛT ━━━━━━━━━━━━{C_END}")
+            print(f" {C_CYAN}/historique{C_END} → dernières modifications de fichiers")
+            print(f" {C_CYAN}/annuler{C_END} → annuler la dernière modification")
+            print(f" {C_CYAN}/diff [fichier]{C_END} → voir ce qui a changé")
+            print(f" {C_CYAN}/cout{C_END} → tokens utilisés dans la session")
+            print(f" {C_CYAN}/limite [nombre|off]{C_END} → plafond de tokens pour la session")
+            print(f" {C_CYAN}/dicter{C_END} → parler au lieu d'écrire (Termux:API)")
+            print(f" {C_CYAN}/parrainer{C_END} → ton code de parrainage (+ tokens offerts)")
             print(f"\n{C_BOLD}{C_YELLOW}━━━━━━ MÉMOIRE & DIVERS ━━━━━━━━━━━━━{C_END}")
             print(f"  {C_CYAN}/memory KEY VAL{C_END}           → stocker une connaissance")
             print(f"  {C_CYAN}/memoire | /oublier{C_END}        → lire / effacer la mémoire")
@@ -1516,6 +1625,10 @@ def cmd_chat(args: argparse.Namespace) -> int:
             if not allowed:
                 print(f"\n{C_RED}{limit_message}{C_END}\n")
                 continue
+        ok_cout, message_cout = cout.SESSION.verifier(cout.estimer_tokens(line), confirmer=False)
+        if not ok_cout:
+            print(f"\n{C_RED}{message_cout}{C_END}\n")
+            continue
         store.add_message(session_id, "user", line)
         context = build_context(cwd, store, config, include_files=bool(config.get("chat_include_files", True)))
         
@@ -1542,8 +1655,11 @@ def cmd_chat(args: argparse.Namespace) -> int:
             save_auth(session)
             tokens_used = data.get("tokens_utilises")
             tokens_left = data.get("solde_restant")
+            cout.SESSION.ajouter(tokens_used)
         else:
             code, output = run_provider(provider, f"{context}\n\nUser request:\n{line}", config, cwd)
+            if code == 0:
+                cout.SESSION.ajouter_estimation(f"{context}{line}", output)
             print(" " * 40, end="\r")  # Clear loader
         
         store.add_message(

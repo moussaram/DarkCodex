@@ -522,3 +522,73 @@ def crediter_profil(user_id: str, tokens: int, plan: str) -> dict[str, Any]:
     if isinstance(data, list):
         data = data[0] if data else {}
     return data if isinstance(data, dict) else {}
+
+
+# ── Parrainage (voir supabase_parrainage.sql) ───────────────────
+
+
+def generer_code_parrainage() -> str:
+    """Format DK-XXXXXX (6 caractères, même alphabet sans ambiguïté que les codes de connexion)."""
+    return "DK-" + "".join(secrets.choice(ALPHABET_CODE) for _ in range(6))
+
+
+def _code_parrainage_existant(user_id: str) -> str:
+    response = requests.get(
+        rest_url("profils", {"id": f"eq.{user_id}", "select": "code_parrainage", "limit": "1"}),
+        headers=service_headers(),
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase profils (select): HTTP {response.status_code}")
+    rows = response.json()
+    return str((rows[0].get("code_parrainage") if rows else "") or "")
+
+
+def obtenir_code_parrainage(user_id: str) -> str:
+    """Retourne le code de l'utilisateur, en le créant à la première demande."""
+    existant = _code_parrainage_existant(user_id)
+    if existant:
+        return existant
+    for _ in range(5):  # plusieurs essais au cas (très rare) où le code existerait déjà
+        code = generer_code_parrainage()
+        response = requests.patch(
+            rest_url("profils", {"id": f"eq.{user_id}", "code_parrainage": "is.null"}),
+            headers=service_headers({"Prefer": "return=representation"}),
+            json={"code_parrainage": code},
+            timeout=20,
+        )
+        if response.status_code == 409:  # code déjà pris par quelqu'un d'autre
+            continue
+        if not response.ok:
+            raise RuntimeError(f"Supabase profils (update): HTTP {response.status_code} {response.text[:200]}")
+        if response.json():
+            return code
+        return _code_parrainage_existant(user_id) or code  # une autre requête a créé le code entre-temps
+    raise RuntimeError("Impossible de créer un code de parrainage.")
+
+
+def stats_parrainage(user_id: str) -> dict[str, int]:
+    response = requests.get(
+        rest_url("parrainages", {"parrain_id": f"eq.{user_id}", "select": "bonus"}),
+        headers=service_headers(),
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase parrainages (select): HTTP {response.status_code}")
+    rows = response.json()
+    rows = rows if isinstance(rows, list) else []
+    return {"filleuls": len(rows), "tokens_gagnes": sum(int(r.get("bonus") or 0) for r in rows)}
+
+
+def utiliser_parrainage(user_id: str, code: str, bonus: int, max_filleuls: int, jours: int) -> str:
+    """Appelle la fonction SQL atomique. Retourne 'ok' ou le motif du refus."""
+    response = requests.post(
+        f"{supabase_url()}/rest/v1/rpc/utiliser_code_parrainage",
+        headers=service_headers(),
+        json={"p_user_id": user_id, "p_code": code, "p_bonus": int(bonus), "p_max_filleuls": int(max_filleuls), "p_jours": int(jours)},
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase utiliser_code_parrainage: HTTP {response.status_code} {response.text[:200]}")
+    resultat = response.json()
+    return str(resultat if not isinstance(resultat, list) else (resultat[0] if resultat else ""))

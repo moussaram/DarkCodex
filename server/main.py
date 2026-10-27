@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -508,6 +509,62 @@ def version() -> dict[str, str]:
 @app.get("/", include_in_schema=False)
 def racine() -> dict[str, Any]:
     return {"service": "DarkCodex API", "device": DEVICE_PAGE}
+
+
+# ── Parrainage ──────────────────────────────────────────────────
+PARRAINAGE_REFUS = {
+    "code_inconnu": (404, "Code de parrainage inconnu."),
+    "code_personnel": (400, "Tu ne peux pas utiliser ton propre code."),
+    "code_invalide": (400, "Ce code ne peut pas être utilisé."),
+    "deja_parraine": (409, "Tu as déjà utilisé un code de parrainage."),
+    "parrain_complet": (409, "Ce code a atteint son nombre maximum de filleuls."),
+    "compte_trop_ancien": (403, "Le code de parrainage doit être utilisé dans les premiers jours du compte."),
+    "profil_introuvable": (404, "Profil introuvable."),
+}
+
+
+def _entier_env(nom: str, defaut: int) -> int:
+    try:
+        return int(os.environ.get(nom, "").strip())
+    except ValueError:
+        return defaut
+
+
+class ParrainageIn(BaseModel):
+    code: str
+
+
+@app.get("/parrainage")
+def parrainage(authorization: str | None = Header(None)) -> Any:
+    session = _utilisateur(authorization)
+    try:
+        code = device.obtenir_code_parrainage(session["user_id"])
+        stats = device.stats_parrainage(session["user_id"])
+    except Exception as exc:
+        return _erreur(exc)
+    return {"code": code, "bonus": _entier_env("PARRAINAGE_BONUS", 2000), **stats}
+
+
+@app.post("/parrainage/utiliser")
+def parrainage_utiliser(payload: ParrainageIn, authorization: str | None = Header(None)) -> Any:
+    session = _utilisateur(authorization)
+    code = payload.code.strip().upper()
+    if not re.fullmatch(r"DK-[A-Z0-9]{6}", code):
+        raise HTTPException(status_code=400, detail="Format de code invalide (exemple : DK-AB23CD).")
+    bonus = _entier_env("PARRAINAGE_BONUS", 2000)
+    try:
+        resultat = device.utiliser_parrainage(
+            session["user_id"], code, bonus,
+            _entier_env("PARRAINAGE_MAX_FILLEULS", 20), _entier_env("PARRAINAGE_JOURS_MAX", 7),
+        )
+    except Exception as exc:
+        return _erreur(exc)
+    if resultat == "ok":
+        return {"status": "ok", "tokens_ajoutes": bonus}
+    if resultat in PARRAINAGE_REFUS:
+        statut, message = PARRAINAGE_REFUS[resultat]
+        raise HTTPException(status_code=statut, detail=message)
+    return _erreur(RuntimeError("Réponse inattendue du parrainage."))
 
 
 # Fichiers statiques du site (auth.js, site.css) : à garder TOUT EN BAS du fichier.

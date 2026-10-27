@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connexion — DarkCodex</title>
+  <link rel="stylesheet" href="/static/site.css">
+</head>
+<body>
+  <main>
+    <h1>Connexion à DarkCodex</h1>
+    <div class="carte" id="bloc-connexion">
+      <div class="onglets">
+        <button type="button" id="onglet-connexion">Se connecter</button>
+        <button type="button" id="onglet-inscription" class="secondaire">Créer un compte</button>
+      </div>
+      <form id="form-mdp" novalidate>
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="email" required>
+        <label for="mdp">Mot de passe (8 caractères minimum)</label>
+        <input id="mdp" type="password" autocomplete="current-password" minlength="8" required>
+        <p><button type="submit" id="btn-valider">Se connecter</button></p>
+      </form>
+      <p><button type="button" class="secondaire" id="btn-google">Continuer avec Google</button></p>
+      <p>
+        <button type="button" class="secondaire" id="btn-lien">Recevoir un lien par email</button>
+        <button type="button" class="secondaire" id="btn-oublie">Mot de passe oublié</button>
+      </p>
+      <div class="msg" id="msg"></div>
+    </div>
+    <div class="carte cache" id="bloc-reset">
+      <h2>Nouveau mot de passe</h2>
+      <form id="form-reset" novalidate>
+        <label for="nouveau">Nouveau mot de passe (8 caractères minimum)</label>
+        <input id="nouveau" type="password" autocomplete="new-password" minlength="8">
+        <p><button type="submit">Enregistrer</button></p>
+      </form>
+      <div class="msg" id="msg-reset"></div>
+    </div>
+  </main>
+  <script type="module">
+    import { getSupabase, getSession, memoriserRetour, lireRetour, oublierRetour, connexionMotDePasse, inscription, connexionGoogle, lienMagique, motDePasseOublie } from "/static/auth.js";
+
+    const $ = (id) => document.getElementById(id);
+
+    let mode = "connexion";
+
+    function message(cible, texte, type) { const m = $(cible); m.textContent = texte; m.className = "msg " + type; }
+
+    function erreurLisible(e) {
+      const t = String((e && e.message) || e);
+      if (/Invalid login credentials/i.test(t)) return "Email ou mot de passe incorrect.";
+      if (/already registered/i.test(t)) return "Un compte existe déjà avec cet email : connectez-vous.";
+      if (/Password should be/i.test(t)) return "Mot de passe trop court (8 caractères minimum).";
+      if (/Email not confirmed/i.test(t)) return "Email non confirmé : ouvrez le lien reçu par email.";
+      return t;
+    }
+
+    function choisirMode(nouveau) {
+      mode = nouveau;
+      $("btn-valider").textContent = nouveau === "connexion" ? "Se connecter" : "Créer mon compte";
+      $("mdp").autocomplete = nouveau === "connexion" ? "current-password" : "new-password";
+      $("onglet-connexion").className = nouveau === "connexion" ? "" : "secondaire";
+      $("onglet-inscription").className = nouveau === "inscription" ? "" : "secondaire";
+    }
+
+    function terminer() { const retour = lireRetour(); oublierRetour(); location.replace(retour); }
+
+    function emailSaisi() {
+      const email = $("email").value.trim();
+      if (!email) { message("msg", "Saisissez votre email.", "ko"); return null; }
+      return email;
+    }
+
+    const params = new URLSearchParams(location.search);
+
+    if (params.get("retour")) memoriserRetour(params.get("retour"));
+
+    const supabase = await getSupabase();
+
+    const recuperation = location.hash.includes("type=recovery");
+
+    function montrerReset() { $("bloc-connexion").classList.add("cache"); $("bloc-reset").classList.remove("cache"); }
+
+    supabase.auth.onAuthStateChange((evenement) => { if (evenement === "PASSWORD_RECOVERY") montrerReset(); });
+
+    if (recuperation) montrerReset();
+
+    else if (await getSession()) terminer();
+
+    $("onglet-connexion").addEventListener("click", () => choisirMode("connexion"));
+
+    $("onglet-inscription").addEventListener("click", () => choisirMode("inscription"));
+
+    $("form-mdp").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const email = emailSaisi(); const mdp = $("mdp").value;
+      if (!email) return;
+      if (mdp.length < 8) return message("msg", "Mot de passe : 8 caractères minimum.", "ko");
+      $("btn-valider").disabled = true;
+      try {
+        if (mode === "connexion") { await connexionMotDePasse(email, mdp); terminer(); }
+        else {
+          const resultat = await inscription(email, mdp);
+          if (resultat.confirmationEmail) message("msg", "Compte créé. Ouvrez le lien reçu par email pour confirmer, puis revenez vous connecter.", "ok");
+          else terminer();
+        }
+      } catch (erreur) { message("msg", erreurLisible(erreur), "ko"); }
+      finally { $("btn-valider").disabled = false; }
+    });
+
+    $("btn-google").addEventListener("click", async () => {
+      try { await connexionGoogle(); } catch (erreur) { message("msg", erreurLisible(erreur), "ko"); }
+    });
+
+    $("btn-lien").addEventListener("click", async () => {
+      const email = emailSaisi(); if (!email) return;
+      try { await lienMagique(email); message("msg", "Lien envoyé : ouvrez votre email et cliquez dessus.", "ok"); }
+      catch (erreur) { message("msg", erreurLisible(erreur), "ko"); }
+    });
+
+    $("btn-oublie").addEventListener("click", async () => {
+      const email = emailSaisi(); if (!email) return;
+      try { await motDePasseOublie(email); message("msg", "Email envoyé : suivez le lien pour choisir un nouveau mot de passe.", "ok"); }
+      catch (erreur) { message("msg", erreurLisible(erreur), "ko"); }
+    });
+
+    $("form-reset").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const mdp = $("nouveau").value;
+      if (mdp.length < 8) return message("msg-reset", "Mot de passe : 8 caractères minimum.", "ko");
+      const { error } = await supabase.auth.updateUser({ password: mdp });
+      if (error) return message("msg-reset", erreurLisible(error), "ko");
+      message("msg-reset", "Mot de passe modifié.", "ok");
+      setTimeout(terminer, 1200);
+    });
+  </script>
+</body>
+</html>

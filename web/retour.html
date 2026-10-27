@@ -31,14 +31,22 @@
       if (!id) message("Aucun paiement en cours.", "ko");
       else {
         let fini = false;
-        for (let essai = 0; essai < 12 && !fini; essai++) {
+        for (let essai = 0; essai < 14 && !fini; essai++) {
           const reponse = await apiFetch("/confirmer-paiement", { method: "POST", body: JSON.stringify({ session_id: id }) });
           const data = await reponse.json().catch(() => ({}));
           const detail = data.detail && typeof data.detail === "object" ? data.detail : {};
 
           if (reponse.ok && (data.status === "confirme" || data.status === "deja_credite")) {
             localStorage.removeItem("dk_paiement");
-            message(data.status === "confirme" ? "Paiement confirmé : " + Number(data.tokens_ajoutes).toLocaleString("fr-FR") + " tokens ajoutés à votre compte." : "Ce paiement a déjà été crédité.", "ok");
+            const solde = data.tokens_solde !== undefined
+              ? " Nouveau solde : " + Number(data.tokens_solde).toLocaleString("fr-FR") + " tokens."
+              : "";
+            message(
+              (data.status === "confirme"
+                ? "Paiement confirmé : " + Number(data.tokens_ajoutes).toLocaleString("fr-FR") + " tokens ajoutés à votre compte."
+                : "Ce paiement a déjà été crédité.") + solde + " Retournez dans DarkCodex et tapez /solde.",
+              "ok"
+            );
             fini = true;
           } else if (reponse.status === 402 && ATTENTE.includes(String(detail.etat))) await pause(3000);
           else {

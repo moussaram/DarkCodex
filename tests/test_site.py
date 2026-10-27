@@ -141,8 +141,38 @@ class RoutesTests(unittest.TestCase):
     def test_plans(self):
         with mock.patch.object(
             srv_device, "lister_plans", return_value=[{"nom": "starter", "tokens": 50000, "prix_fcfa": 500}]
-        ):
-            self.assertEqual(self.client.get("/plans").json()[0]["nom"], "starter")
+        ) as lister:
+            reponse = self.client.get("/plans")  # aucun en-tête : public
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(reponse.json()[0]["nom"], "starter")
+        lister.assert_called_once_with()
+
+    def test_plans_exclut_le_plan_gratuit(self):
+        """GET /plans ne doit jamais renvoyer le plan gratuit (prix 0)."""
+        import urllib.parse
+
+        with mock.patch.dict(os.environ, ENV), mock.patch.object(srv_device.requests, "get") as get:
+            get.return_value.ok = True
+            get.return_value.json.return_value = []
+            srv_device.lister_plans()
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(get.call_args.args[0]).query)
+        self.assertEqual(query["prix_fcfa"], ["gt.0"])
+        self.assertEqual(query["order"], ["prix_fcfa.asc"])
+
+    def test_pages_sans_inner_html(self):
+        """Aucun contenu venant du serveur inséré avec innerHTML (injection)."""
+        for page in sorted((Path(__file__).resolve().parent.parent / "web").glob("*.html")):
+            texte = page.read_text(encoding="utf-8")
+            self.assertNotIn("innerHTML", texte, page.name)
+            self.assertNotIn("insertAdjacentHTML", texte, page.name)
+
+    def test_retour_affiche_le_solde_et_la_commande_solde(self):
+        texte = (Path(__file__).resolve().parent.parent / "web" / "retour.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("tapez /solde", texte)
+        self.assertIn("Nouveau solde", texte)
+        self.assertIn("essai < 14", texte)  # ≈ 40 s de vérification côté retour SasPay
 
     def test_pages_et_fichiers_statiques(self):
         for chemin in ("/device", "/connexion", "/abonnements", "/compte", "/paiement/retour"):

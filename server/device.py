@@ -326,8 +326,16 @@ def revoquer_appareil(token: str) -> bool:
 
 
 def lister_plans() -> list[dict[str, Any]]:
+    """Plans payants proposés à l'achat (le plan gratuit est exclu)."""
     response = requests.get(
-        rest_url("plans", {"select": "nom,tokens,prix_fcfa,description", "order": "prix_fcfa.asc"}),
+        rest_url(
+            "plans",
+            {
+                "prix_fcfa": "gt.0",
+                "select": "nom,tokens,prix_fcfa,description",
+                "order": "prix_fcfa.asc",
+            },
+        ),
         headers=service_headers(),
         timeout=20,
     )

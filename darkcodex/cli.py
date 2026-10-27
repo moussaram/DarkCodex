@@ -633,6 +633,15 @@ def clear_auth() -> None:
         pass
 
 
+def deconnecter() -> None:
+    """Révoque le jeton d'appareil côté serveur (meilleur effort), puis efface la session locale."""
+    session = load_auth()
+    jeton = str((session or {}).get("token") or "")
+    if jeton.startswith("dkx_"):
+        api_call("/logout", method="POST", token=jeton, timeout=10)
+    clear_auth()
+
+
 def api_call(
     path: str,
     method: str = "GET",
@@ -1417,7 +1426,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 session = nouvelle_session
             continue
         if line == "/logout":
-            clear_auth()
+            deconnecter()
             session = None
             print(f"\n{C_GREEN}✅ Déconnecté avec succès. À bientôt !{C_END}\n")
             return 0

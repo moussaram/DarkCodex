@@ -7,6 +7,7 @@ Toutes les requêtes partent avec la service_role key, jamais avec la clé anon
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
 import secrets
 import string
@@ -183,6 +184,109 @@ def confirmer_code(code: str, user_id: str, token: str) -> bool:
     return bool(rows)
 
 
+# ── Codes appareil : lecture seule, suppression ─────────────────
+
+
+def code_en_attente(code: str) -> bool:
+    """Vrai si le code existe, n'est pas expiré et n'a pas encore été confirmé."""
+    row = _lire_code((code or "").strip().upper())
+    if not row or row.get("confirme"):
+        return False
+    try:
+        expire = dt.datetime.fromisoformat(str(row.get("expire_a") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expire.tzinfo is None:
+        expire = expire.replace(tzinfo=dt.timezone.utc)
+    return expire >= dt.datetime.now(dt.timezone.utc)
+
+
+def supprimer_code(code: str) -> bool:
+    """Supprime un code (meilleur effort : une erreur ne doit pas bloquer la connexion)."""
+    try:
+        response = requests.delete(
+            rest_url("device_codes", {"code": f"eq.{(code or '').strip().upper()}"}),
+            headers=service_headers(),
+            timeout=20,
+        )
+    except requests.RequestException:
+        return False
+    return response.ok
+
+
+# ── Appareils : jetons longue durée (table « appareils ») ───────
+
+APPAREIL_PREFIX = "dkx_"
+
+
+def _empreinte(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def creer_appareil(user_id: str, email: str, nom: str) -> str:
+    """Crée un jeton d'appareil. Seule son empreinte SHA-256 est enregistrée."""
+    token = APPAREIL_PREFIX + secrets.token_urlsafe(32)
+    response = requests.post(
+        rest_url("appareils"),
+        headers=service_headers({"Prefer": "return=minimal"}),
+        json={"user_id": user_id, "email": email, "nom": nom, "token_hash": _empreinte(token)},
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase appareils (insert): HTTP {response.status_code} {response.text[:300]}")
+    return token
+
+
+def lire_appareil(token: str) -> dict[str, Any] | None:
+    response = requests.get(
+        rest_url(
+            "appareils",
+            {
+                "token_hash": f"eq.{_empreinte(token)}",
+                "revoque": "eq.false",
+                "select": "*",
+                "limit": "1",
+            },
+        ),
+        headers=service_headers(),
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase appareils (select): HTTP {response.status_code}")
+    rows = response.json()
+    return rows[0] if rows else None
+
+
+def revoquer_appareil(token: str) -> bool:
+    """Révoque un jeton d'appareil (déconnexion). Ignore les jetons qui n'en sont pas."""
+    if not (token or "").startswith(APPAREIL_PREFIX):
+        return False
+    response = requests.patch(
+        rest_url("appareils", {"token_hash": f"eq.{_empreinte(token)}"}),
+        headers=service_headers({"Prefer": "return=representation"}),
+        json={"revoque": True},
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase appareils (update): HTTP {response.status_code}")
+    try:
+        return bool(response.json())
+    except ValueError:
+        return False
+
+
+def lister_plans() -> list[dict[str, Any]]:
+    response = requests.get(
+        rest_url("plans", {"select": "nom,tokens,prix_fcfa,description", "order": "prix_fcfa.asc"}),
+        headers=service_headers(),
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase plans (select): HTTP {response.status_code}")
+    rows = response.json()
+    return rows if isinstance(rows, list) else []
+
+
 # ── Auth Supabase + profils ────────────────────────────────────
 
 
@@ -191,6 +295,20 @@ def verifier_token(token: str) -> dict[str, Any] | None:
     token = (token or "").strip()
     if not token:
         return None
+    if token.startswith(APPAREIL_PREFIX):  # jeton d'appareil (terminal)
+        appareil = lire_appareil(token)
+        if not appareil:
+            return None
+        user_id = str(appareil.get("user_id") or "")
+        profil = lire_profil(user_id) or {}
+        return {
+            "user_id": user_id,
+            "email": str(appareil.get("email") or profil.get("email") or ""),
+            "nom": str(appareil.get("nom") or profil.get("nom") or ""),
+            "tokens_solde": int(profil.get("tokens_solde") or 0),
+            "tokens_utilises": int(profil.get("tokens_utilises") or 0),
+            "plan": str(profil.get("plan") or "gratuit"),
+        }
     try:
         response = requests.get(
             f"{supabase_url()}/auth/v1/user",

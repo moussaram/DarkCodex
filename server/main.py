@@ -150,17 +150,38 @@ def device_confirm(payload: DeviceConfirmIn, authorization: str | None = Header(
     if not session:
         raise HTTPException(status_code=401, detail="Token invalide ou expiré.")
     try:
-        ok = device.confirmer_code(payload.code, session["user_id"], token)
+        if not device.code_en_attente(payload.code):
+            raise HTTPException(status_code=404, detail="Code expiré ou introuvable.")
+        # Le terminal reçoit son PROPRE jeton longue durée, jamais le jeton du navigateur.
+        jeton_appareil = device.creer_appareil(session["user_id"], session["email"], session["nom"])
+        try:
+            ok = device.confirmer_code(payload.code, session["user_id"], jeton_appareil)
+        except Exception:
+            device.revoquer_appareil(jeton_appareil)
+            raise
+        if not ok:
+            device.revoquer_appareil(jeton_appareil)
+            raise HTTPException(status_code=404, detail="Code expiré ou introuvable.")
+    except HTTPException:
+        raise
     except Exception as exc:
         return _erreur(exc)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Code expiré ou introuvable.")
     return {
         "status": "confirme",
         "message": "Terminal connecté avec succès !",
         "email": session["email"],
         "nom": session["nom"],
     }
+
+
+@app.post("/logout")
+def logout(authorization: str | None = Header(None)) -> Any:
+    """Révoque le jeton d'appareil du terminal qui appelle."""
+    token = _bearer(authorization)
+    try:
+        return {"revoque": device.revoquer_appareil(token)}
+    except Exception as exc:
+        return _erreur(exc)
 
 
 # ── 4. Vérifier le token au lancement ──────────────────────────

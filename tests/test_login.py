@@ -94,12 +94,14 @@ class DeviceCodeTests(unittest.TestCase):
         payload = srv_main.DeviceConfirmIn(code="DARK-4829")
         with mock.patch.object(
             srv_device, "verifier_token", return_value={"user_id": "u1", "email": "a@b.c", "nom": "M"}
+        ), mock.patch.object(srv_device, "code_en_attente", return_value=True), mock.patch.object(
+            srv_device, "creer_appareil", return_value="dkx_demo"
         ), mock.patch.object(srv_device, "confirmer_code", return_value=True) as confirmer:
             status, data = call(srv_main.device_confirm, payload, authorization="Bearer jwt-demo")
 
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "confirme")
-        confirmer.assert_called_once_with("DARK-4829", "u1", "jwt-demo")
+        confirmer.assert_called_once_with("DARK-4829", "u1", "dkx_demo")
 
     def test_confirm_refuse_sans_token(self):
         payload = srv_main.DeviceConfirmIn(code="DARK-4829")

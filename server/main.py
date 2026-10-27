@@ -15,6 +15,7 @@ Endpoints :
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -73,6 +74,9 @@ app.add_middleware(
 logger = logging.getLogger("darkcodex.server")
 DEVICE_PAGE = os.environ.get("DARKCODEX_DEVICE_URL", "https://darkcodex.onrender.com/device")
 
+# Délai entre deux rattrapages automatiques (0 = désactivé)
+RECONCILIATION_SECONDES = int(os.environ.get("DARKCODEX_RECONCILIATION_SECONDS", "600"))
+
 
 class DeviceConfirmIn(BaseModel):
     code: str
@@ -89,7 +93,7 @@ class PaiementCreerIn(BaseModel):
 
 
 class PaiementIn(BaseModel):
-    session_id: str
+    session_id: str | None = None
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -372,8 +376,12 @@ def _traiter_paiement(paiement: dict[str, Any]) -> dict[str, Any]:
 @app.post("/confirmer-paiement")
 def confirmer_paiement(payload: PaiementIn, authorization: str | None = Header(None)) -> Any:
     session = _utilisateur(authorization)
+    session_id = (payload.session_id or "").strip()
     try:
-        paiement = device.lire_paiement(payload.session_id.strip())
+        if session_id:
+            paiement = device.lire_paiement(session_id)
+        else:
+            paiement = device.dernier_paiement(session["user_id"])
     except Exception as exc:
         return _erreur(exc)
     # Même réponse si la session n'existe pas ou appartient à quelqu'un d'autre.
@@ -387,10 +395,10 @@ def confirmer_paiement(payload: PaiementIn, authorization: str | None = Header(N
         return _erreur(exc)
 
 
-def _reconcilier() -> dict[str, Any]:
-    """Après un webhook : vérifie les paiements récents encore en attente."""
+def _reconcilier(limite: int = 30) -> dict[str, Any]:
+    """Rattrape les paiements payés mais pas encore crédités."""
     credites = 0
-    for paiement in device.paiements_en_attente(limite=5):
+    for paiement in device.paiements_en_attente(limite=limite):
         try:
             resultat = _traiter_paiement(paiement)
         except HTTPException:
@@ -401,6 +409,29 @@ def _reconcilier() -> dict[str, Any]:
         if resultat.get("status") == "confirme":
             credites += 1
     return {"ok": True, "credites": credites}
+
+
+def _session_id_du_webhook(evenement: dict[str, Any]) -> str:
+    """Cherche l'identifiant de session dans le webhook.
+
+    Le format exact de SasPay n'est pas confirmé : on essaie plusieurs formes.
+    C'est une simple INDICATION : le paiement est toujours revérifié auprès
+    de SasPay par _traiter_paiement.
+    """
+    data = evenement.get("data") if isinstance(evenement.get("data"), dict) else {}
+    objets: list[dict[str, Any]] = [evenement, data]
+    for cle in ("object", "session", "checkout_session", "transaction"):
+        sous_objet = data.get(cle)
+        if isinstance(sous_objet, dict):
+            objets.append(sous_objet)
+    for objet in objets:
+        for cle in ("session_id", "checkout_session_id", "checkout_session"):
+            valeur = objet.get(cle)
+            if isinstance(valeur, dict):
+                valeur = valeur.get("id")
+            if valeur:
+                return str(valeur)
+    return ""
 
 
 @app.post("/webhooks/saspay")
@@ -425,8 +456,26 @@ async def webhook_saspay(request: Request) -> Any:
         raise HTTPException(status_code=400, detail="Corps JSON invalide.") from exc
     if not isinstance(evenement, dict) or evenement.get("event") != "transaction.success":
         return {"ok": True, "credites": 0}
+
+    data = evenement.get("data")
+    logger.info(
+        "Webhook SasPay reçu : clés=%s, clés data=%s",
+        sorted(evenement),
+        sorted(data) if isinstance(data, dict) else type(data).__name__,
+    )
+    session_id = _session_id_du_webhook(evenement)
+    if session_id:
+        try:
+            paiement = await run_in_threadpool(device.lire_paiement, session_id)
+            if paiement:
+                resultat = await run_in_threadpool(_traiter_paiement, paiement)
+                return {"ok": True, "credites": 1 if resultat.get("status") == "confirme" else 0}
+        except HTTPException:
+            pass  # pas encore payé côté SasPay : on retombe sur le rattrapage
+        except Exception as exc:  # noqa: BLE001
+            return _erreur(exc)
     try:
-        return await run_in_threadpool(_reconcilier)
+        return await run_in_threadpool(_reconcilier, 30)
     except Exception as exc:
         return _erreur(exc)  # 503 : SasPay réessaiera plus tard
 
@@ -563,6 +612,25 @@ def parrainage_utiliser(payload: ParrainageIn, authorization: str | None = Heade
         statut, message = PARRAINAGE_REFUS[resultat]
         raise HTTPException(status_code=statut, detail=message)
     return _erreur(RuntimeError("Réponse inattendue du parrainage."))
+
+
+# ── Rattrapage périodique des paiements (problème 2) ───────────
+
+
+async def _boucle_reconciliation() -> None:
+    while True:
+        await asyncio.sleep(RECONCILIATION_SECONDES)
+        try:
+            await run_in_threadpool(_reconcilier, 30)
+        except Exception:  # noqa: BLE001
+            logger.exception("Rattrapage périodique des paiements échoué.")
+
+
+@app.on_event("startup")
+async def _demarrer_reconciliation() -> None:
+    if RECONCILIATION_SECONDES > 0:
+        # On garde une référence pour que la tâche ne soit pas supprimée.
+        app.state.tache_reconciliation = asyncio.create_task(_boucle_reconciliation())
 
 
 # Fichiers statiques du site (auth.js, site.css) : à garder TOUT EN BAS du fichier.

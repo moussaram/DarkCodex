@@ -372,6 +372,109 @@ class SasPayTests(unittest.TestCase):
         rec.assert_called_once()
 
 
+class WebhookRattrapageTests(unittest.TestCase):
+    """Problème 2 : identifiant du webhook, rattrapage et /confirmer-paiement sans id."""
+
+    ENV = {"SASPAY_SECRET_KEY": "sk_test_abc", "SASPAY_WEBHOOK_SECRET": "whsec_x"}
+
+    def _requete_webhook(self, corps: bytes) -> FauxRequest:
+        import time
+        ts = int(time.time())
+        return FauxRequest(
+            corps,
+            {"X-Webhook-Signature": signer(corps, "whsec_x", ts), "X-Webhook-Timestamp": str(ts)},
+        )
+
+    def test_session_id_du_webhook_formes_variees(self):
+        self.assertEqual(srv_main._session_id_du_webhook({"session_id": "s1"}), "s1")
+        self.assertEqual(srv_main._session_id_du_webhook({"data": {"session_id": "s1"}}), "s1")
+        self.assertEqual(srv_main._session_id_du_webhook({"data": {"checkout_session": {"id": "s1"}}}), "s1")
+        self.assertEqual(srv_main._session_id_du_webhook({}), "")
+
+    def test_webhook_avec_identifiant_traite_ce_paiement_seulement(self):
+        corps = json.dumps({"event": "transaction.success", "data": {"session_id": "s1"}}).encode()
+        req = self._requete_webhook(corps)
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            srv_device, "lire_paiement", return_value=dict(PAIEMENT)
+        ) as lire, mock.patch.object(
+            srv_main, "_traiter_paiement", return_value={"status": "confirme"}
+        ) as traiter, mock.patch.object(srv_main, "_reconcilier") as rec:
+            data = asyncio.run(srv_main.webhook_saspay(req))
+        self.assertEqual(data, {"ok": True, "credites": 1})
+        lire.assert_called_once_with("s1")
+        traiter.assert_called_once()
+        rec.assert_not_called()
+
+    def test_webhook_sans_identifiant_lance_le_rattrapage(self):
+        corps = b'{"event":"transaction.success","data":{}}'
+        req = self._requete_webhook(corps)
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            srv_main, "_reconcilier", return_value={"ok": True, "credites": 2}
+        ) as rec:
+            data = asyncio.run(srv_main.webhook_saspay(req))
+        self.assertEqual(data["credites"], 2)
+        rec.assert_called_once_with(30)
+
+    def test_reconcilier_utilise_30_paiements_par_defaut(self):
+        with mock.patch.object(srv_device, "paiements_en_attente", return_value=[]) as en_attente:
+            data = srv_main._reconcilier()
+        en_attente.assert_called_once_with(limite=30)
+        self.assertEqual(data, {"ok": True, "credites": 0})
+
+    def test_paiements_en_attente_30_sur_3_jours(self):
+        import urllib.parse
+
+        env = {"SUPABASE_URL": "https://proj.supabase.co", "SUPABASE_SERVICE_KEY": "service-secret"}
+        with mock.patch.dict("os.environ", env), mock.patch.object(
+            srv_device.requests, "get"
+        ) as get:
+            get.return_value.ok = True
+            get.return_value.json.return_value = []
+            srv_device.paiements_en_attente()
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(get.call_args.args[0]).query)
+        self.assertEqual(query["limit"], ["30"])
+        depuis = dt.datetime.fromisoformat(query["cree_a"][0].removeprefix("gte."))
+        ecart = (dt.datetime.now(dt.timezone.utc) - depuis).total_seconds()
+        self.assertAlmostEqual(ecart, 3 * 86400, delta=120)
+
+    def test_confirmer_sans_identifiant_utilise_dernier_paiement(self):
+        with mock.patch.object(srv_device, "verifier_token", return_value=dict(PROFIL_VALIDE)), mock.patch.object(
+            srv_device, "dernier_paiement", return_value=dict(PAIEMENT)
+        ) as dernier, mock.patch.object(srv_device, "lire_paiement") as lire, mock.patch.object(
+            srv_main, "_traiter_paiement", return_value={"status": "confirme"}
+        ):
+            status, data = call(
+                srv_main.confirmer_paiement, srv_main.PaiementIn(), authorization="Bearer jwt-demo"
+            )
+        self.assertEqual((status, data["status"]), (200, "confirme"))
+        dernier.assert_called_once_with("u1")
+        lire.assert_not_called()
+
+    def test_confirmer_sans_identifiant_ne_credite_pas_paiement_d_autrui(self):
+        with mock.patch.object(srv_device, "verifier_token", return_value=dict(PROFIL_VALIDE)), mock.patch.object(
+            srv_device, "dernier_paiement", return_value={**PAIEMENT, "user_id": "u2"}
+        ), mock.patch.object(srv_main, "_traiter_paiement") as traiter:
+            status, data = call(
+                srv_main.confirmer_paiement, srv_main.PaiementIn(), authorization="Bearer jwt-demo"
+            )
+        self.assertEqual(status, 404)
+        traiter.assert_not_called()
+
+    def test_confirmer_avec_identifiant_garde_la_lecture_directe(self):
+        with mock.patch.object(srv_device, "verifier_token", return_value=dict(PROFIL_VALIDE)), mock.patch.object(
+            srv_device, "lire_paiement", return_value=dict(PAIEMENT)
+        ), mock.patch.object(srv_device, "dernier_paiement") as dernier, mock.patch.object(
+            srv_main, "_traiter_paiement", return_value={"status": "confirme"}
+        ):
+            status, data = call(
+                srv_main.confirmer_paiement,
+                srv_main.PaiementIn(session_id="s1"),
+                authorization="Bearer jwt-demo",
+            )
+        self.assertEqual(status, 200)
+        dernier.assert_not_called()
+
+
 class CliLoginTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

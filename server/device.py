@@ -441,7 +441,7 @@ def lire_paiement(session_id: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
-def paiements_en_attente(limite: int = 10, depuis_minutes: int = 120) -> list[dict[str, Any]]:
+def paiements_en_attente(limite: int = 30, depuis_minutes: int = 4320) -> list[dict[str, Any]]:
     """Paiements récents encore en attente (réconciliation après un webhook)."""
     depuis = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=depuis_minutes)).isoformat(
         timespec="seconds"
@@ -464,6 +464,22 @@ def paiements_en_attente(limite: int = 10, depuis_minutes: int = 120) -> list[di
         raise RuntimeError(f"Supabase paiements (select): HTTP {response.status_code}")
     rows = response.json()
     return rows if isinstance(rows, list) else []
+
+
+def dernier_paiement(user_id: str) -> dict[str, Any] | None:
+    """Dernier paiement d'un utilisateur (tous statuts confondus)."""
+    response = requests.get(
+        rest_url(
+            "paiements",
+            {"user_id": f"eq.{user_id}", "order": "cree_a.desc", "limit": "1", "select": "*"},
+        ),
+        headers=service_headers(),
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase paiements: HTTP {response.status_code}")
+    rows = response.json()
+    return rows[0] if isinstance(rows, list) and rows else None
 
 
 def _changer_statut(session_id: str, de: str, vers: str) -> bool:

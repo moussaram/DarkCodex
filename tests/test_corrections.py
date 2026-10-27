@@ -112,13 +112,20 @@ class ModeSecuriseTests(unittest.TestCase):
         cli.AUTH_PATH.write_text(json.dumps({"token": "t", "mode": "fullauto"}))
         self.assertEqual(cli.load_mode(), "suggest")
 
-    def test_est_pro_par_plan_serveur(self):
-        self.assertTrue(cli.est_pro({"plan": "pro"}))
-        self.assertFalse(cli.est_pro({"plan": "gratuit"}))
+    def test_est_pro_exige_plan_payant_et_tokens(self):
+        self.assertTrue(cli.est_pro({"plan": "pro", "tokens_solde": 1200}))
+        self.assertTrue(cli.est_pro({"plan": "starter", "tokens_solde": 1}))
+        self.assertFalse(cli.est_pro({"plan": "pro", "tokens_solde": 0}))
+        self.assertFalse(cli.est_pro({"plan": "gratuit", "tokens_solde": 5000}))
+        self.assertFalse(cli.est_pro({"plan": "pro", "tokens_solde": "abc"}))
+        self.assertFalse(cli.est_pro({}))
 
-    def test_est_pro_par_licence_locale(self):
-        licence.save_data({**licence.default_data(), "pro_active": True})
-        self.assertTrue(cli.est_pro({}))
+    def test_appliquer_reponse_serveur_met_a_jour_le_plan(self):
+        session = {"token": "t", "plan": "pro", "tokens_solde": 10}
+        with mock.patch.object(cli, "save_auth") as sauve:
+            cli.appliquer_reponse_serveur(session, {"solde_restant": 0, "plan": "gratuit"})
+        self.assertEqual((session["tokens_solde"], session["plan"]), (0, "gratuit"))
+        sauve.assert_called_once()
 
     def test_autoedit_refuse_sans_pro(self):
         with contextlib.redirect_stdout(io.StringIO()) as sortie:
@@ -661,7 +668,7 @@ class HandshakeTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def test_ecriture_du_handshake(self):
-        donnees = cli.ecrire_handshake({"plan": "pro"})
+        donnees = cli.ecrire_handshake({"plan": "pro", "tokens_solde": 1200})
         self.assertTrue(cli.HANDSHAKE_PATH.exists())
         self.assertTrue(donnees["app_id"].startswith("dc-"))
         self.assertTrue(donnees["pro_active"])

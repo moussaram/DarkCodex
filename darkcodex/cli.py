@@ -638,6 +638,14 @@ def clear_auth() -> None:
         pass
 
 
+def appliquer_reponse_serveur(session: dict, data: dict) -> None:
+    """Met à jour le solde ET le plan après une réponse de /chat."""
+    session["tokens_solde"] = data.get("solde_restant", session.get("tokens_solde"))
+    if data.get("plan"):
+        session["plan"] = data["plan"]
+    save_auth(session)
+
+
 def deconnecter() -> None:
     """Révoque le jeton d'appareil côté serveur (meilleur effort), puis efface la session locale."""
     session = load_auth()
@@ -902,8 +910,7 @@ def ai_answer(provider: str, prompt: str, config: dict, cwd: Path) -> tuple[int,
         code, output, data = server_answer(session, prompt)
         if code == 0:  # server_answer renvoie 0 en cas de succès (et non 200)
             cout.SESSION.ajouter(data.get("tokens_utilises"))
-            session["tokens_solde"] = data.get("solde_restant", session.get("tokens_solde"))
-            save_auth(session)
+            appliquer_reponse_serveur(session, data)
             show_token_line(data.get("tokens_utilises"), data.get("solde_restant"))
             return 0, output
         if code == 401:
@@ -912,6 +919,7 @@ def ai_answer(provider: str, prompt: str, config: dict, cwd: Path) -> tuple[int,
         if code == 402:
             show_exhausted()
             session["tokens_solde"] = 0
+            session["plan"] = "gratuit"
             save_auth(session)
             return 1, ""
         return code, output
@@ -951,17 +959,21 @@ def read_auth_file() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+PLANS_GRATUITS = {"", "gratuit", "gratuite", "free"}
+
+
 def est_pro(session: dict | None = None) -> bool:
-    """C03 : Pro = plan payant côté serveur ou licence Pro active localement."""
+    """Vrai seulement avec un plan payant ET des tokens restants."""
     if session is None:
         session = load_auth()
-    if session:
-        plan = str(session.get("plan") or "gratuit").strip().lower()
-        if plan not in {"", "gratuit", "free", "gratuite"}:
-            return True
+    if not session:
+        return False
+    plan = str(session.get("plan") or "gratuit").strip().lower()
+    if plan in PLANS_GRATUITS:
+        return False
     try:
-        return bool(licence.load_data().get("pro_active"))
-    except (OSError, json.JSONDecodeError):
+        return int(session.get("tokens_solde") or 0) > 0
+    except (TypeError, ValueError):
         return False
 
 
@@ -1178,6 +1190,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         if code == 402:
             show_exhausted()
             session["tokens_solde"] = 0
+            session["plan"] = "gratuit"
             save_auth(session)
             return 1
         if code == 401:
@@ -1187,8 +1200,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         if code != 0:
             print(output, file=sys.stderr)
             return code
-        session["tokens_solde"] = data.get("solde_restant", session.get("tokens_solde"))
-        save_auth(session)
+        appliquer_reponse_serveur(session, data)
         tokens_used = data.get("tokens_utilises")
         tokens_left = data.get("solde_restant")
     else:
@@ -1641,6 +1653,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
             if code == 402:
                 show_exhausted()
                 session["tokens_solde"] = 0
+                session["plan"] = "gratuit"
                 save_auth(session)
                 continue
             if code == 401:
@@ -1651,8 +1664,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
             if code != 0:
                 print(f"{C_RED}⛔ {output}{C_END}\n")
                 continue
-            session["tokens_solde"] = data.get("solde_restant", session.get("tokens_solde"))
-            save_auth(session)
+            appliquer_reponse_serveur(session, data)
             tokens_used = data.get("tokens_utilises")
             tokens_left = data.get("solde_restant")
             cout.SESSION.ajouter(tokens_used)

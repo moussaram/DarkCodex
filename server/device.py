@@ -592,3 +592,25 @@ def utiliser_parrainage(user_id: str, code: str, bonus: int, max_filleuls: int, 
         raise RuntimeError(f"Supabase utiliser_code_parrainage: HTTP {response.status_code} {response.text[:200]}")
     resultat = response.json()
     return str(resultat if not isinstance(resultat, list) else (resultat[0] if resultat else ""))
+
+
+# ── Débit atomique (fonction SQL debiter_tokens, supabase_correctifs.sql) ────
+
+
+def debiter_profil(user_id: str, tokens: int) -> dict[str, Any]:
+    """Retire des tokens de façon atomique (fonction SQL debiter_tokens).
+
+    Renvoie le profil mis à jour (tokens_solde, tokens_utilises, plan).
+    """
+    response = requests.post(
+        f"{supabase_url()}/rest/v1/rpc/debiter_tokens",
+        headers=service_headers(),
+        json={"p_user_id": user_id, "p_tokens": max(0, int(tokens))},
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase debiter_tokens: HTTP {response.status_code}")
+    rows = response.json()
+    if isinstance(rows, list):
+        rows = rows[0] if rows else {}
+    return rows if isinstance(rows, dict) else {}

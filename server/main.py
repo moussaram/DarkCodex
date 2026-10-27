@@ -234,24 +234,22 @@ def chat(payload: ChatIn, authorization: str | None = Header(None)) -> Any:
     except gemini.GeminiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    tokens_utilises = max(0, tokens_utilises)
-    nouveau_solde = max(0, solde - tokens_utilises)
+    tokens_utilises = max(0, int(tokens_utilises))
     try:
-        device.maj_profil(
-            user_id,
-            {
-                "tokens_solde": nouveau_solde,
-                "tokens_utilises": int(session["tokens_utilises"] or 0) + tokens_utilises,
-            },
-        )
-    except Exception as exc:
-        return _erreur(exc)
+        profil = device.debiter_profil(user_id, tokens_utilises)
+    except Exception:
+        # Gemini a déjà répondu : on ne perd pas la réponse, mais on journalise.
+        logger.exception("Débit de %s tokens échoué pour %s", tokens_utilises, user_id)
+        profil = {}
+
+    nouveau_solde = int(profil.get("tokens_solde", max(0, solde - tokens_utilises)) or 0)
+    plan = str(profil.get("plan") or session.get("plan") or "gratuit")
 
     return {
         "reponse": reponse,
         "tokens_utilises": tokens_utilises,
         "solde_restant": nouveau_solde,
-        "plan": session["plan"],
+        "plan": plan,
     }
 
 

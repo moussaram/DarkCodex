@@ -147,16 +147,45 @@ class ChatTests(unittest.TestCase):
         with mock.patch.object(srv_device, "verifier_token", return_value=avec_solde), mock.patch.object(
             srv_gemini, "appeler_gemini", return_value=("Réponse Gemini", 150)
         ) as gemini_call, mock.patch.object(
-            srv_device, "maj_profil", return_value={"tokens_solde": 4850, "tokens_utilises": 150}
-        ) as maj:
+            srv_device, "debiter_profil", return_value={"tokens_solde": 4850, "tokens_utilises": 150, "plan": "gratuit"}
+        ) as debit, mock.patch.object(srv_device, "maj_profil") as maj:
             status, data = call(srv_main.chat, payload, authorization="Bearer jwt-demo")
 
         self.assertEqual(status, 200)
         self.assertEqual(data["reponse"], "Réponse Gemini")
         self.assertEqual(data["tokens_utilises"], 150)
         self.assertEqual(data["solde_restant"], 4850)
+        self.assertEqual(data["plan"], "gratuit")
         self.assertEqual(gemini_call.call_args.args[0], "explique ce projet")
-        maj.assert_called_once_with("u1", {"tokens_solde": 4850, "tokens_utilises": 150})
+        debit.assert_called_once_with("u1", 150)
+        maj.assert_not_called()
+
+    def test_debit_echoue_reponse_quand_meme(self):
+        """Si debiter_profil lève une erreur, la réponse de Gemini est quand même renvoyée."""
+        payload = srv_main.ChatIn(message="bonjour")
+        with mock.patch.object(srv_device, "verifier_token", return_value=dict(PROFIL_VALIDE)), mock.patch.object(
+            srv_gemini, "appeler_gemini", return_value=("Réponse Gemini", 150)
+        ), mock.patch.object(srv_device, "debiter_profil", side_effect=RuntimeError("Supabase debiter_tokens: HTTP 500")):
+            status, data = call(srv_main.chat, payload, authorization="Bearer jwt-demo")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["reponse"], "Réponse Gemini")
+        self.assertEqual(data["solde_restant"], 4850)  # repli sur l'ancien calcul
+        self.assertEqual(data["plan"], "gratuit")
+
+    def test_reponse_contient_solde_et_plan(self):
+        payload = srv_main.ChatIn(message="bonjour")
+        avec_plan = {**PROFIL_VALIDE, "plan": "pro"}
+        with mock.patch.object(srv_device, "verifier_token", return_value=avec_plan), mock.patch.object(
+            srv_gemini, "appeler_gemini", return_value=("ok", 10)
+        ), mock.patch.object(
+            srv_device, "debiter_profil", return_value={"tokens_solde": 4990, "tokens_utilises": 10, "plan": "pro"}
+        ):
+            status, data = call(srv_main.chat, payload, authorization="Bearer jwt-demo")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["solde_restant"], 4990)
+        self.assertEqual(data["plan"], "pro")
 
     def test_solde_epuise_retourne_solde_insuffisant(self):
         payload = srv_main.ChatIn(message="bonjour")

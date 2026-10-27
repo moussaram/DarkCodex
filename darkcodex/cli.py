@@ -24,6 +24,7 @@ from . import (
     agent_session,
     agent_terminal,
     agent_tests,
+    cout,
     historique,
     langues,
     licence,
@@ -894,8 +895,12 @@ def ai_answer(provider: str, prompt: str, config: dict, cwd: Path) -> tuple[int,
     """Réponse IA : via l'API DarkCodex si connecté, sinon via le fournisseur local."""
     session = load_auth()
     if session:
+        ok_cout, message_cout = cout.SESSION.verifier(cout.estimer_tokens(prompt))
+        if not ok_cout:
+            return 1, message_cout
         code, output, data = server_answer(session, prompt)
-        if code == 200:
+        if code == 0:  # server_answer renvoie 0 en cas de succès (et non 200)
+            cout.SESSION.ajouter(data.get("tokens_utilises"))
             session["tokens_solde"] = data.get("solde_restant", session.get("tokens_solde"))
             save_auth(session)
             show_token_line(data.get("tokens_utilises"), data.get("solde_restant"))
@@ -910,10 +915,16 @@ def ai_answer(provider: str, prompt: str, config: dict, cwd: Path) -> tuple[int,
             return 1, ""
         return code, output
 
+    ok_cout, message_cout = cout.SESSION.verifier(cout.estimer_tokens(prompt))
+    if not ok_cout:
+        return 1, message_cout
     allowed, limit_message = licence.consume_request()
     if not allowed:
         return 1, limit_message
-    return run_provider(provider, prompt, config, cwd)
+    code, output = run_provider(provider, prompt, config, cwd)
+    if code == 0:
+        cout.SESSION.ajouter_estimation(prompt, output)
+    return code, output
 
 
 # ── Modes d'autorisation de l'agent (Partie 1) ────────────

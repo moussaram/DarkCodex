@@ -24,6 +24,51 @@
 
     function element(balise, texte, classe) { const e = document.createElement(balise); if (texte !== undefined) e.textContent = texte; if (classe) e.className = classe; return e; }
 
+    const ATTENTE = ["pending", "processing", "created", "initiated", "open", "inconnu"];
+
+    const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    async function chargerSolde() {
+      const solde = await apiFetch("/solde").then((r) => r.json()).catch(() => null);
+      if (solde && solde.tokens_solde !== undefined) {
+        $("solde").textContent = "Solde actuel : " + nombre(solde.tokens_solde) + " tokens (plan " + solde.plan + ")";
+      }
+      return solde;
+    }
+
+    async function verifierPaiement() {
+      message("Vérification du paiement en cours…", "");
+      for (let essai = 0; essai < 14; essai++) {
+        const id = localStorage.getItem("dk_paiement");
+        const reponse = await apiFetch("/confirmer-paiement", {
+          method: "POST",
+          body: JSON.stringify(id ? { session_id: id } : {}),
+        });
+        const data = await reponse.json().catch(() => ({}));
+        const detail = data.detail && typeof data.detail === "object" ? data.detail : {};
+        if (reponse.ok && (data.status === "confirme" || data.status === "deja_credite")) {
+          localStorage.removeItem("dk_paiement");
+          history.replaceState(null, "", location.pathname);
+          await chargerSolde();
+          const soldeTexte = data.tokens_solde !== undefined
+            ? " Nouveau solde : " + nombre(data.tokens_solde) + " tokens."
+            : "";
+          message(
+            (data.status === "confirme" ? "✅ Paiement confirmé." : "Ce paiement a déjà été crédité.")
+              + soldeTexte + " Retournez dans DarkCodex et tapez /solde.",
+            "ok"
+          );
+          return;
+        }
+        if (reponse.status === 402 && ATTENTE.includes(String(detail.etat))) { await pause(3000); continue; }
+        message(reponse.status === 402
+          ? "Le paiement n'a pas abouti (état : " + detail.etat + ")."
+          : "Vérification impossible pour le moment.", "ko");
+        return;
+      }
+      message("Paiement en cours de vérification : vos tokens arriveront automatiquement dans quelques minutes.", "");
+    }
+
     async function payer(plan, bouton) {
       bouton.disabled = true;
       try {
@@ -41,12 +86,7 @@
 
     if (session) {
       try {
-        const [plans, solde] = await Promise.all([
-          fetch("/plans").then((r) => r.json()),
-          apiFetch("/solde").then((r) => r.json()).catch(() => null),
-        ]);
-
-        if (solde && solde.tokens_solde !== undefined) $("solde").textContent = "Solde actuel : " + nombre(solde.tokens_solde) + " tokens (plan " + solde.plan + ")";
+        const plans = await fetch("/plans").then((r) => r.json());
 
         for (const plan of plans) {
           const carte = element("div", undefined, "carte");
@@ -63,6 +103,13 @@
           $("plans").append(carte);
         }
       } catch (erreur) { message("Impossible de charger les plans.", "ko"); }
+
+      await chargerSolde();
+
+      // Retour de SasPay (?retour=1 ou session mémorisée) : vérification ~40 s.
+      if (new URLSearchParams(location.search).has("retour") || localStorage.getItem("dk_paiement")) {
+        await verifierPaiement();
+      }
     }
   </script>
 </body>

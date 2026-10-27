@@ -174,6 +174,14 @@ class RoutesTests(unittest.TestCase):
         self.assertIn("Nouveau solde", texte)
         self.assertIn("essai < 14", texte)  # ≈ 40 s de vérification côté retour SasPay
 
+    def test_abonnements_verifie_le_retour_saspay(self):
+        texte = (Path(__file__).resolve().parent.parent / "web" / "abonnements.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/confirmer-paiement", texte)
+        self.assertIn("essai < 14", texte)  # ≈ 40 s de vérification au retour de SasPay
+        self.assertIn("tapez /solde", texte)
+
     def test_pages_et_fichiers_statiques(self):
         for chemin in ("/device", "/connexion", "/abonnements", "/compte", "/paiement/retour"):
             reponse = self.client.get(chemin)

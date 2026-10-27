@@ -24,6 +24,7 @@ from . import (
     agent_session,
     agent_terminal,
     agent_tests,
+    historique,
     langues,
     licence,
     memory,
@@ -1263,6 +1264,7 @@ def handle_file_agent_command(line: str, cwd: Path, provider: str, config: dict)
         description = " ".join(parts[2:]).strip('"')
         code, output = call_ai(agent_fichiers.generate_prompt(path, description))
         if code == 0:
+            historique.enregistrer(cwd, path)
             agent_fichiers.write_generated_file(path, output)
             print(f"Fichier généré: {path}")
             memory.remember_conversation(line, f"Fichier généré: {path}")
@@ -1283,6 +1285,7 @@ def handle_file_agent_command(line: str, cwd: Path, provider: str, config: dict)
     code, output = call_ai(prompt)
     if mode == "corriger" and code == 0:
         backup = agent_fichiers.backup_file(path)
+        historique.enregistrer(cwd, path)
         agent_fichiers.write_generated_file(path, output)
         print(f"Fichier corrigé: {path}")
         print(f"Sauvegarde créée: {backup}")

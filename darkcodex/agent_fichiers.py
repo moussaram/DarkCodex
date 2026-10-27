@@ -4,6 +4,8 @@ import os
 import shutil
 from pathlib import Path
 
+from . import historique
+
 
 TEXT_EXTENSIONS = {
     ".py": "Python",
@@ -412,6 +414,7 @@ def appliquer_fichier(cible: Path, contenu: str, ctx, action: str = "modificatio
             ctx.note(f"Création refusée : {cible}")
             return False
 
+    historique.enregistrer(getattr(ctx, "cwd", None) or cible.parent, cible)
     write_generated_file(cible, nettoye)
     try:
         nouveau = cible.read_text(encoding="utf-8", errors="replace")

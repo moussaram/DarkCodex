@@ -31,6 +31,7 @@ from . import (
     memory,
     navigateur,
     updater,
+    voix,
 )
 from .fsutil import atomic_write_text
 

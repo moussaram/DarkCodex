@@ -27,6 +27,7 @@ from . import (
     langues,
     licence,
     memory,
+    navigateur,
 )
 from .fsutil import atomic_write_text
 
@@ -754,15 +755,25 @@ def device_login() -> dict | None:
     except (TypeError, ValueError):
         duree = LOGIN_TIMEOUT_SECONDS
 
+    separateur = "&" if "?" in lien else "?"
+    lien_direct = f"{lien}{separateur}code={urllib.parse.quote(code)}"
+    if navigateur.ouvrir(lien_direct):
+        consignes = [
+            "Votre navigateur s'ouvre pour vous connecter.",
+            "S'il ne s'ouvre pas, ouvrez ce lien :",
+            f"→ {lien_direct}",
+        ]
+    else:
+        consignes = ["Ouvrez ce lien dans votre navigateur :", f"→ {lien_direct}"]
+
     print()
     print(
         box(
             "🔐 Connexion à DarkCodex",
             "",
-            "1. Ouvrez ce lien dans votre navigateur :",
-            f"→ {lien}",
+            *consignes,
             "",
-            f"2. Entrez ce code : {code}",
+            f"Code affiché sur la page : {code}",
             "",
             "⏳ En attente de confirmation...",
         )

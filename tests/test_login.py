@@ -386,13 +386,15 @@ class CliLoginTests(unittest.TestCase):
                 },
             ),
         ]
-        with mock.patch.object(cli, "api_call", side_effect=reponses):
+        with mock.patch.object(cli, "api_call", side_effect=reponses), mock.patch.object(
+            cli.navigateur, "ouvrir", return_value=False
+        ):
             session, output = self._run(cli.device_login)
 
         self.assertIsNotNone(session)
         self.assertIn("🔐 Connexion à DarkCodex", output)
-        self.assertIn("→ https://darkcodex.onrender.com/device", output)
-        self.assertIn("2. Entrez ce code : DARK-4829", output)
+        self.assertIn("→ https://darkcodex.onrender.com/device?code=DARK-4829", output)
+        self.assertIn("Code affiché sur la page : DARK-4829", output)
         self.assertIn("⏳ En attente de confirmation...", output)
         self.assertIn("✅ Connexion réussie ! Bienvenue Moussa !", output)
         self.assertIn("💰 Tokens gratuits : 5 000 tokens", output)
@@ -407,7 +409,9 @@ class CliLoginTests(unittest.TestCase):
             (200, {"code": "DARK-4829", "lien": "https://darkcodex.onrender.com/device", "expire_dans": 600}),
             (200, {"status": "expire"}),
         ]
-        with mock.patch.object(cli, "api_call", side_effect=reponses):
+        with mock.patch.object(cli, "api_call", side_effect=reponses), mock.patch.object(
+            cli.navigateur, "ouvrir", return_value=False
+        ):
             session, output = self._run(cli.device_login)
 
         self.assertIsNone(session)

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DarkCodex</title>
+  <link rel="stylesheet" href="/static/site.css">
+</head>
+<body>
+  <main>
+    <h1>DarkCodex</h1>
+    <p class="doux">Le service central DarkCodex pour connecter un terminal, consulter votre solde et gérer les abonnements.</p>
+
+    <div class="grille">
+      <div class="carte">
+        <h2>Connexion</h2>
+        <p class="doux">Accédez à votre compte et continuez votre session.</p>
+        <p><a class="bouton" href="/connexion">Se connecter</a></p>
+      </div>
+
+      <div class="carte">
+        <h2>Abonnements</h2>
+        <p class="doux">Consultez les plans et ajoutez des tokens disponibles.</p>
+        <p><a class="bouton" href="/abonnements">Voir les plans</a></p>
+      </div>
+
+      <div class="carte">
+        <h2>Compte</h2>
+        <p class="doux">Vérifiez votre profil et votre solde DarkCodex.</p>
+        <p><a class="bouton" href="/compte">Mon compte</a></p>
+      </div>
+
+      <div class="carte">
+        <h2>Terminal</h2>
+        <p class="doux">Associez votre appareil ou votre terminal à votre compte.</p>
+        <p><a class="bouton" href="/device">Lier un appareil</a></p>
+      </div>
+    </div>
+
+    <div class="carte">
+      <h2>Informations</h2>
+      <p>Le service API DarkCodex expose aussi les endpoints de vérification, de paiement et de santé du service. Pour un diagnostic technique, consultez <a href="/health">/health</a> et <a href="/version">/version</a>.</p>
+    </div>
+  </main>
+</body>
+</html>

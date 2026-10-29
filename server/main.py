@@ -169,7 +169,6 @@ def device_confirm(payload: DeviceConfirmIn, authorization: str | None = Header(
     try:
         if not device.code_en_attente(payload.code):
             raise HTTPException(status_code=404, detail="Code expiré ou introuvable.")
-        # Le terminal reçoit son PROPRE jeton longue durée, jamais le jeton du navigateur.
         jeton_appareil = device.creer_appareil(session["user_id"], session["email"], session["nom"])
         try:
             ok = device.confirmer_code(
@@ -261,7 +260,6 @@ def chat(payload: ChatIn, authorization: str | None = Header(None)) -> Any:
     try:
         profil = device.debiter_profil(user_id, tokens_utilises)
     except Exception:
-        # Gemini a déjà répondu : on ne perd pas la réponse, mais on journalise.
         logger.exception("Débit de %s tokens échoué pour %s", tokens_utilises, user_id)
         profil = {}
 
@@ -290,10 +288,6 @@ def solde(authorization: str | None = Header(None)) -> dict[str, Any]:
 
 
 # ── 7. Paiements SasPay ────────────────────────────────────────
-#
-# Flux sûr : c'est LE SERVEUR qui fixe le montant (table plans) et qui lie la
-# session de paiement à l'utilisateur connecté. Le client ne peut donc ni
-# choisir un prix, ni réclamer le paiement d'un autre.
 
 
 @app.post("/paiement/creer")
@@ -351,13 +345,11 @@ def _traiter_paiement(paiement: dict[str, Any]) -> dict[str, Any]:
     if statut_local != "en_attente":
         raise HTTPException(status_code=409, detail={"status": "paiement_bloque", "etat": statut_local})
 
-    # 1. L'état réel du paiement, revérifié par SasPay (jamais notre mémoire).
     statut = saspay.statut_session(session_id)
     if not saspay.est_paye(statut):
         etat = str(statut.get("status") or "inconnu").lower()
         raise HTTPException(status_code=402, detail={"status": "paiement_non_valide", "etat": etat})
 
-    # 2. Le montant, la devise et la commande doivent correspondre à ce qu'on a créé.
     details = saspay.lire_session(session_id)
     meta = details.get("metadata") if isinstance(details.get("metadata"), dict) else {}
     coherent = (
@@ -371,17 +363,16 @@ def _traiter_paiement(paiement: dict[str, Any]) -> dict[str, Any]:
         device.marquer_anomalie(session_id)
         raise HTTPException(status_code=409, detail={"status": "paiement_incoherent"})
 
-    # 3. Réservation atomique : un seul appel gagne, les autres voient « déjà crédité ».
     if not device.reserver_paiement(session_id):
         return {"status": "deja_credite", "tokens_ajoutes": 0, "plan": plan}
     try:
         profil = device.crediter_profil(user_id, tokens, plan)
     except Exception:
-        device.liberer_paiement(session_id)  # rien n'a été crédité : on pourra réessayer
+        device.liberer_paiement(session_id)
         raise
     try:
         device.enregistrer_achat(user_id, plan, tokens, prix, session_id)
-    except Exception:  # l'historique ne doit jamais annuler un crédit déjà fait
+    except Exception:
         logger.exception("Achat %s crédité mais non enregistré dans achats.", session_id)
 
     return {
@@ -403,7 +394,6 @@ def confirmer_paiement(payload: PaiementIn, authorization: str | None = Header(N
             paiement = device.dernier_paiement(session["user_id"])
     except Exception as exc:
         return _erreur(exc)
-    # Même réponse si la session n'existe pas ou appartient à quelqu'un d'autre.
     if not paiement or str(paiement.get("user_id")) != session["user_id"]:
         raise HTTPException(status_code=404, detail="Paiement introuvable.")
     try:
@@ -421,7 +411,7 @@ def _reconcilier(limite: int = 30) -> dict[str, Any]:
         try:
             resultat = _traiter_paiement(paiement)
         except HTTPException:
-            continue  # pas encore payé, ou incohérent : déjà journalisé
+            continue
         except Exception:
             logger.exception("Réconciliation du paiement %s échouée.", paiement.get("session_id"))
             continue
@@ -431,12 +421,6 @@ def _reconcilier(limite: int = 30) -> dict[str, Any]:
 
 
 def _session_id_du_webhook(evenement: dict[str, Any]) -> str:
-    """Cherche l'identifiant de session dans le webhook.
-
-    Le format exact de SasPay n'est pas confirmé : on essaie plusieurs formes.
-    C'est une simple INDICATION : le paiement est toujours revérifié auprès
-    de SasPay par _traiter_paiement.
-    """
     data = evenement.get("data") if isinstance(evenement.get("data"), dict) else {}
     objets: list[dict[str, Any]] = [evenement, data]
     for cle in ("object", "session", "checkout_session", "transaction"):
@@ -455,8 +439,6 @@ def _session_id_du_webhook(evenement: dict[str, Any]) -> str:
 
 @app.post("/webhooks/saspay")
 async def webhook_saspay(request: Request) -> Any:
-    """Notification SasPay. La signature est contrôlée sur le corps BRUT ; le
-    contenu du webhook n'est qu'un déclencheur : l'état réel est revérifié."""
     corps = await request.body()
     try:
         secret = saspay.webhook_secret()
@@ -490,13 +472,13 @@ async def webhook_saspay(request: Request) -> Any:
                 resultat = await run_in_threadpool(_traiter_paiement, paiement)
                 return {"ok": True, "credites": 1 if resultat.get("status") == "confirme" else 0}
         except HTTPException:
-            pass  # pas encore payé côté SasPay : on retombe sur le rattrapage
-        except Exception as exc:  # noqa: BLE001
+            pass
+        except Exception as exc:
             return _erreur(exc)
     try:
         return await run_in_threadpool(_reconcilier, 30)
     except Exception as exc:
-        return _erreur(exc)  # 503 : SasPay réessaiera plus tard
+        return _erreur(exc)
 
 
 # ── Pages du site, configuration publique, plans, version ──────
@@ -572,9 +554,18 @@ def version() -> dict[str, str]:
     }
 
 
+@app.get("/health", include_in_schema=False)
+@app.get("/api/info", include_in_schema=False)
+def info_service() -> dict[str, Any]:
+    return {"service": "DarkCodex API", "status": "ok", "device": DEVICE_PAGE}
+
+
 @app.get("/", include_in_schema=False)
-def racine() -> dict[str, Any]:
-    return {"service": "DarkCodex API", "device": DEVICE_PAGE}
+def racine() -> FileResponse:
+    page = WEB_DIR / "index.html"
+    if not page.exists():
+        raise HTTPException(status_code=404, detail="Page introuvable.")
+    return FileResponse(page, media_type="text/html; charset=utf-8")
 
 
 # ── Parrainage ──────────────────────────────────────────────────
@@ -633,9 +624,6 @@ def parrainage_utiliser(payload: ParrainageIn, authorization: str | None = Heade
     return _erreur(RuntimeError("Réponse inattendue du parrainage."))
 
 
-# ── Rattrapage périodique des paiements (problème 2) ───────────
-
-
 async def _boucle_reconciliation() -> None:
     while True:
         await asyncio.sleep(RECONCILIATION_SECONDES)
@@ -648,10 +636,8 @@ async def _boucle_reconciliation() -> None:
 @app.on_event("startup")
 async def _demarrer_reconciliation() -> None:
     if RECONCILIATION_SECONDES > 0:
-        # On garde une référence pour que la tâche ne soit pas supprimée.
         app.state.tache_reconciliation = asyncio.create_task(_boucle_reconciliation())
 
 
-# Fichiers statiques du site (auth.js, site.css) : à garder TOUT EN BAS du fichier.
 if WEB_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

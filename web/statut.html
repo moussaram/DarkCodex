@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>État du service — DarkCodex</title>
+  <link rel="stylesheet" href="/static/site.css">
+  <script src="/static/nav.js" defer></script>
+</head>
+<body>
+<main>
+  <h1>État du service</h1>
+  <p class="sous-titre">Vérification en direct du serveur DarkCodex.</p>
+
+  <div class="carte">
+    <h3 style="margin-top:0">Serveur</h3>
+    <p class="etat"><span class="point" id="point-sante"></span><span id="texte-sante">Vérification…</span></p>
+    <p class="doux petit" id="note-sante"></p>
+  </div>
+
+  <div class="carte">
+    <h3 style="margin-top:0">Version</h3>
+    <div class="defile"><table class="tableau">
+      <tr><td>Dernière version</td><td id="v-derniere">…</td></tr>
+      <tr><td>Version minimale</td><td id="v-minimale">…</td></tr>
+      <tr><td>Projet</td><td><a id="v-lien" href="#">…</a></td></tr>
+    </table></div>
+    <p class="doux petit" id="v-notes"></p>
+    <p class="doux petit">Pour mettre à jour votre installation : <code>darkcodex update</code></p>
+  </div>
+
+  <p class="doux petit">Si le serveur était endormi, la première vérification peut prendre jusqu'à une minute.</p>
+  <p><button type="button" id="rafraichir" class="secondaire">Vérifier à nouveau</button></p>
+</main>
+<script>
+  (function () {
+    function $(id) { return document.getElementById(id); }
+    function verifier() {
+      $("point-sante").className = "point"; $("texte-sante").textContent = "Vérification…"; $("note-sante").textContent = "";
+      fetch("/health").then(function (r) { return r.status === 404 ? fetch("/version") : r; }).then(function (r) {
+        $("point-sante").className = "point " + (r.ok ? "ok" : "ko");
+        $("texte-sante").textContent = r.ok ? "Le service fonctionne normalement." : "Le service répond avec une erreur (" + r.status + ").";
+      }).catch(function () {
+        $("point-sante").className = "point ko";
+        $("texte-sante").textContent = "Le service est injoignable.";
+        $("note-sante").textContent = "Vérifiez votre connexion Internet, puis réessayez dans un instant.";
+      });
+      fetch("/version").then(function (r) { if (!r.ok) throw new Error("v"); return r.json(); }).then(function (v) {
+        $("v-derniere").textContent = v.latest || "inconnue";
+        $("v-minimale").textContent = v.minimum || "—";
+        var lien = $("v-lien");
+        if (v.url && /^https:\/\//.test(v.url)) { lien.href = v.url; lien.textContent = v.url; } else { lien.removeAttribute("href"); lien.textContent = "—"; }
+        $("v-notes").textContent = v.notes || "";
+      }).catch(function () { $("v-derniere").textContent = "indisponible"; $("v-minimale").textContent = "indisponible"; });
+    }
+    $("rafraichir").addEventListener("click", verifier);
+    verifier();
+  })();
+</script>
+</body>
+</html>

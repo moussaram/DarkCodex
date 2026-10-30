@@ -3,44 +3,107 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DarkCodex</title>
+  <title>DarkCodex — L'assistant IA de codage dans votre terminal</title>
+  <meta name="description" content="DarkCodex est un assistant IA qui vit dans votre terminal (Android/Termux, Linux, Windows) : il lit votre projet, écrit et corrige le code, lance les tests et gère Git.">
   <link rel="stylesheet" href="/static/site.css">
+  <script src="/static/nav.js" defer></script>
 </head>
 <body>
-  <main>
-    <h1>DarkCodex</h1>
-    <p class="doux">Le service central DarkCodex pour connecter un terminal, consulter votre solde et gérer les abonnements.</p>
+<main>
+  <section class="hero">
+    <span class="pastille">Android · Termux · Linux · Windows</span>
+    <h1>Un assistant IA de codage<br>directement dans votre terminal</h1>
+    <p class="accroche">DarkCodex lit votre projet, écrit et corrige le code, lance vos tests et gère Git. Vous parlez en français, il agit sur vos fichiers.</p>
+    <div class="actions">
+      <a class="bouton" href="/installation">Installer DarkCodex</a>
+      <a class="bouton secondaire" href="/abonnements">Voir les tarifs</a>
+    </div>
+    <p class="doux petit">5 000 tokens offerts à l'inscription · aucune carte bancaire requise</p>
+  </section>
 
+  <section id="fonctions">
+    <h2>Ce que DarkCodex sait faire</h2>
+    <p class="sous-titre">Tout se passe dans votre terminal, avec des commandes simples.</p>
     <div class="grille">
-      <div class="carte">
-        <h2>Connexion</h2>
-        <p class="doux">Accédez à votre compte et continuez votre session.</p>
-        <p><a class="bouton" href="/connexion">Se connecter</a></p>
-      </div>
-
-      <div class="carte">
-        <h2>Abonnements</h2>
-        <p class="doux">Consultez les plans et ajoutez des tokens disponibles.</p>
-        <p><a class="bouton" href="/abonnements">Voir les plans</a></p>
-      </div>
-
-      <div class="carte">
-        <h2>Compte</h2>
-        <p class="doux">Vérifiez votre profil et votre solde DarkCodex.</p>
-        <p><a class="bouton" href="/compte">Mon compte</a></p>
-      </div>
-
-      <div class="carte">
-        <h2>Terminal</h2>
-        <p class="doux">Associez votre appareil ou votre terminal à votre compte.</p>
-        <p><a class="bouton" href="/device">Lier un appareil</a></p>
-      </div>
+      <div class="carte"><div class="icone">💬</div><h3>Chat de programmation</h3><p class="doux">Posez vos questions de code en français et obtenez des réponses directes, avec le contexte de votre projet.</p></div>
+      <div class="carte"><div class="icone">📁</div><h3>Agent de fichiers</h3><p class="doux">Il analyse un projet, lit, explique, crée, modifie, corrige et refactorise vos fichiers. Chaque changement est sauvegardé.</p></div>
+      <div class="carte"><div class="icone">⚙️</div><h3>Agent terminal</h3><p class="doux">Installer les dépendances, compiler, lancer le serveur, exécuter les tests ou enchaîner des étapes automatiquement.</p></div>
+      <div class="carte"><div class="icone">🐞</div><h3>Débogage et revue</h3><p class="doux">Collez une erreur : DarkCodex l'analyse et propose la correction. Il peut aussi relire votre code.</p></div>
+      <div class="carte"><div class="icone">🌿</div><h3>Git intégré</h3><p class="doux">Statut, différences, historique, commit, branches, push et pull. Il peut expliquer un commit ou résumer vos changements.</p></div>
+      <div class="carte"><div class="icone">🧪</div><h3>Tests</h3><p class="doux">Génère des tests pour un fichier et lance toute la suite en une commande.</p></div>
+      <div class="carte"><div class="icone">↩️</div><h3>Historique et annulation</h3><p class="doux">Une modification ne vous plaît pas ? <code>/annuler</code> revient en arrière, <code>/diff</code> montre ce qui a changé.</p></div>
+      <div class="carte"><div class="icone">🧠</div><h3>Mémoire et sessions</h3><p class="doux">DarkCodex retient vos préférences et vos projets, et vous pouvez sauvegarder puis reprendre une session.</p></div>
+      <div class="carte"><div class="icone">🎙️</div><h3>Dictée vocale</h3><p class="doux">Sur Termux, parlez au lieu d'écrire avec <code>/dicter</code>.</p></div>
+      <div class="carte"><div class="icone">🌍</div><h3>Multilingue</h3><p class="doux">Changez de langue à tout moment et traduisez un texte avec <code>/traduire</code>.</p></div>
+      <div class="carte"><div class="icone">🎁</div><h3>Parrainage</h3><p class="doux">Invitez un ami avec votre code de parrainage et gagnez des tokens offerts.</p></div>
+      <div class="carte"><div class="icone">🔒</div><h3>Vous gardez la main</h3><p class="doux">Trois modes, de « je confirme chaque action » à « autonomie totale ». Vous choisissez le niveau de contrôle.</p></div>
     </div>
+  </section>
 
-    <div class="carte">
-      <h2>Informations</h2>
-      <p>Le service API DarkCodex expose aussi les endpoints de vérification, de paiement et de santé du service. Pour un diagnostic technique, consultez <a href="/health">/health</a> et <a href="/version">/version</a>.</p>
+  <section id="fonctionnement">
+    <h2>Comment ça marche</h2>
+    <ol class="etapes">
+      <li><b>Installez</b>Quelques commandes sur Android (Termux), Linux ou Windows. <a href="/installation">Voir le guide</a></li>
+      <li><b>Connectez votre compte</b>Tapez <code>/login</code>, ouvrez le lien affiché et entrez le code <code>DARK-XXXX</code>.</li>
+      <li><b>Travaillez</b>Posez vos questions, laissez l'agent modifier vos fichiers et lancer vos tests. <a href="/utilisation">Voir le guide</a></li>
+      <li><b>Rechargez si besoin</b>Quand vos tokens sont épuisés, achetez un pack en quelques minutes. <a href="/abonnements">Voir les tarifs</a></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Un exemple en 20 secondes</h2>
+    <pre><code>$ darkcodex
+&gt; /projet .
+Projet analysé : 42 fichiers, Python, tests pytest.
+&gt; corrige l'erreur de connexion dans server/main.py
+Modification proposée dans server/main.py (sauvegarde créée). Appliquer ? [o/N]
+&gt; /tests run
+38 tests réussis.</code></pre>
+    <p class="doux petit">Exemple illustratif du déroulement. Les réponses réelles dépendent de votre projet.</p>
+  </section>
+
+  <section id="tarifs">
+    <h2>Des tarifs simples</h2>
+    <p class="sous-titre">Des packs de tokens : vous payez ce que vous utilisez, sans abonnement obligatoire. Vos tokens n'expirent pas.</p>
+    <div class="grille" id="plans"><p class="doux">Chargement des tarifs…</p></div>
+    <p><a class="bouton secondaire" href="/abonnements">Détails et achat</a></p>
+  </section>
+
+  <section>
+    <h2>Pour qui ?</h2>
+    <div class="grille">
+      <div class="carte"><h3>Développeurs sur mobile</h3><p class="doux">Vous codez depuis votre téléphone avec Termux : DarkCodex est pensé pour ce cas.</p></div>
+      <div class="carte"><h3>Étudiants et débutants</h3><p class="doux">Demandez des explications, faites corriger vos erreurs et apprenez en pratiquant.</p></div>
+      <div class="carte"><h3>Équipes et freelances</h3><p class="doux">Gagnez du temps sur le débogage, les tests et les tâches répétitives.</p></div>
     </div>
-  </main>
+  </section>
+
+  <section class="carte" style="text-align:center">
+    <h2 style="margin-top:0">Prêt à essayer ?</h2>
+    <p class="doux">Installez DarkCodex, connectez-vous et utilisez vos 5 000 tokens offerts.</p>
+    <p><a class="bouton" href="/installation">Commencer l'installation</a> <a class="bouton secondaire" href="/faq">Questions fréquentes</a></p>
+  </section>
+</main>
+<script>
+  (function () {
+    var conteneur = document.getElementById("plans");
+    var nombre = function (n) { return Number(n).toLocaleString("fr-FR"); };
+    function el(b, t, c) { var e = document.createElement(b); if (t !== undefined) e.textContent = t; if (c) e.className = c; return e; }
+    fetch("/plans").then(function (r) { if (!r.ok) throw new Error("plans"); return r.json(); }).then(function (plans) {
+      conteneur.textContent = "";
+      if (!Array.isArray(plans) || !plans.length) { conteneur.append(el("p", "Les tarifs sont disponibles sur la page Tarifs.", "doux")); return; }
+      plans.forEach(function (p) {
+        var carte = el("div", undefined, "carte");
+        carte.append(el("h3", p.nom.charAt(0).toUpperCase() + p.nom.slice(1)));
+        carte.append(el("p", p.prix_fcfa > 0 ? nombre(p.prix_fcfa) + " FCFA" : "Gratuit", "prix"));
+        carte.append(el("p", nombre(p.tokens) + " tokens", "doux"));
+        conteneur.append(carte);
+      });
+    }).catch(function () {
+      conteneur.textContent = "";
+      conteneur.append(el("p", "Les tarifs sont disponibles sur la page Tarifs.", "doux"));
+    });
+  })();
+</script>
 </body>
 </html>

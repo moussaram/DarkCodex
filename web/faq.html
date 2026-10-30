@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Questions fréquentes — DarkCodex</title>
+  <meta name="description" content="Réponses aux questions fréquentes sur DarkCodex : installation, compte, tokens, paiement, sécurité.">
+  <link rel="stylesheet" href="/static/site.css">
+  <script src="/static/nav.js" defer></script>
+</head>
+<body>
+<main>
+  <h1>Questions fréquentes</h1>
+  <p class="sous-titre">Vous ne trouvez pas votre réponse ? Lancez <code>darkcodex doctor</code> dans le terminal, il diagnostique l'installation.</p>
+
+  <h2>Général</h2>
+  <details><summary>Qu'est-ce que DarkCodex ?</summary><p class="doux">Un assistant IA qui s'utilise dans un terminal. Il lit votre projet, écrit et corrige le code, lance les tests et gère Git, à partir de demandes en français. Voir la <a href="/">présentation</a>.</p></details>
+  <details><summary>Sur quels appareils fonctionne-t-il ?</summary><p class="doux">Sur Android avec Termux, sur Linux et sur Windows. Voir le <a href="/installation">guide d'installation</a>.</p></details>
+  <details><summary>Quelle IA est utilisée ?</summary><p class="doux">Vos demandes passent par le serveur DarkCodex, qui interroge un modèle Gemini de Google. Vous n'avez aucune clé d'IA à configurer.</p></details>
+  <details><summary>Faut-il un compte ?</summary><p class="doux">Oui. Le compte vous donne accès à l'IA et à vos tokens. Il est gratuit et se crée avec Google ou par lien email.</p></details>
+
+  <h2>Installation et connexion</h2>
+  <details><summary>Comment connecter mon terminal à mon compte ?</summary><p class="doux">Tapez <code>/login</code> dans DarkCodex : un code <code>DARK-XXXX</code> et un lien s'affichent. Ouvrez le lien, connectez-vous et entrez le code. Détails dans le <a href="/installation#connexion">guide</a>.</p></details>
+  <details><summary>Le code DARK-XXXX est refusé.</summary><p class="doux">Il expire au bout de quelques minutes. Tapez à nouveau <code>/login</code> pour en obtenir un nouveau, et vérifiez la saisie.</p></details>
+  <details><summary>Ma première réponse prend près d'une minute.</summary><p class="doux">C'est normal après une période d'inactivité : le serveur se réveille. Ensuite, les réponses sont rapides.</p></details>
+  <details><summary>Comment me déconnecter ou changer de compte ?</summary><p class="doux">Tapez <code>/logout</code> dans le terminal, puis <code>/login</code> avec l'autre compte.</p></details>
+  <details><summary>Comment mettre à jour DarkCodex ?</summary><p class="doux">Lancez <code>darkcodex update</code>.</p></details>
+
+  <h2>Tokens et tarifs</h2>
+  <details><summary>Qu'est-ce qu'un token ?</summary><p class="doux">Une unité de mesure du texte échangé avec l'IA (vos demandes, le contexte et les réponses). Chaque réponse consomme des tokens.</p></details>
+  <details><summary>Combien de tokens sont offerts ?</summary><p class="doux">5 000 tokens à l'inscription.</p></details>
+  <details><summary>Comment voir mon solde ?</summary><p class="doux">Tapez <code>/solde</code> dans le terminal ou ouvrez la page <a href="/compte">Mon compte</a>.</p></details>
+  <details><summary>Que se passe-t-il quand j'ai épuisé mes tokens ?</summary><p class="doux">DarkCodex affiche un message avec le lien de recharge. Achetez un pack sur la page <a href="/abonnements">Tarifs</a> : vos nouveaux tokens sont disponibles tout de suite.</p></details>
+  <details><summary>Mes tokens expirent-ils ?</summary><p class="doux">Non. Les packs sont à paiement unique et restent disponibles jusqu'à leur utilisation.</p></details>
+  <details><summary>Comment limiter ma consommation ?</summary><p class="doux">Utilisez <code>/cout</code> pour voir les tokens consommés pendant la session et <code>/limite 20000</code> pour fixer un plafond.</p></details>
+  <details><summary>Y a-t-il un programme de parrainage ?</summary><p class="doux">Oui. Tapez <code>/parrainer</code> pour obtenir votre code à partager. Votre ami l'utilise avec <code>/parrainer utiliser DK-XXXXXX</code> dans les premiers jours de son compte.</p></details>
+
+  <h2>Paiement</h2>
+  <details><summary>Quels moyens de paiement ?</summary><p class="doux">Le paiement passe par SasPay (mobile money et carte selon votre pays). Les moyens exacts s'affichent sur la page de paiement.</p></details>
+  <details><summary>J'ai payé mais je n'ai pas reçu mes tokens.</summary><p class="doux">Patientez quelques minutes, puis ouvrez la page <a href="/abonnements">Tarifs</a> : elle vérifie automatiquement votre dernier paiement. Assurez-vous d'être connecté avec le compte utilisé dans le terminal.</p></details>
+  <details><summary>Mes données bancaires sont-elles en sécurité ?</summary><p class="doux">Vous payez sur la page de SasPay. DarkCodex ne voit ni ne stocke vos coordonnées bancaires.</p></details>
+
+  <h2>Utilisation et sécurité</h2>
+  <details><summary>DarkCodex peut-il modifier mes fichiers sans me demander ?</summary><p class="doux">Cela dépend du mode. En <code>suggest</code>, vous confirmez chaque action. Les modes <code>autoedit</code> et <code>fullauto</code> agissent automatiquement. Vous pouvez annuler avec <code>/annuler</code>.</p></details>
+  <details><summary>Puis-je annuler une modification ?</summary><p class="doux">Oui : <code>/annuler</code> annule la dernière modification, <code>/historique</code> liste les changements et <code>/diff</code> montre ce qui a changé.</p></details>
+  <details><summary>Mes fichiers sont-ils envoyés quelque part ?</summary><p class="doux">Le texte de vos demandes et le contexte que vous choisissez d'inclure sont envoyés au serveur DarkCodex puis au modèle d'IA pour produire la réponse. N'envoyez pas de mots de passe ou de secrets. Voir la <a href="/legal">politique de confidentialité</a>.</p></details>
+  <details><summary>L'IA peut-elle se tromper ?</summary><p class="doux">Oui, comme tout assistant IA. Relisez les modifications (<code>/diff</code>), lancez vos tests et utilisez Git pour garder une trace.</p></details>
+  <details><summary>Où sont stockées mes données locales ?</summary><p class="doux">Dans le dossier <code>~/.darkcodex</code> (configuration et mémoire locale).</p></details>
+
+  <p style="margin-top:28px"><a class="bouton" href="/installation">Installer DarkCodex</a> <a class="bouton secondaire" href="/utilisation">Guide d'utilisation</a></p>
+</main>
+</body>
+</html>

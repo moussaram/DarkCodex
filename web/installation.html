@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Installation — DarkCodex</title>
+  <meta name="description" content="Guide complet pour installer DarkCodex sur Android (Termux), Linux et Windows, puis connecter votre compte.">
+  <link rel="stylesheet" href="/static/site.css">
+  <script src="/static/nav.js" defer></script>
+</head>
+<body>
+<main>
+  <h1>Guide d'installation</h1>
+  <p class="sous-titre">Comptez 5 à 10 minutes. Choisissez votre système, puis connectez votre compte.</p>
+
+  <div class="sommaire">
+    <a href="#prerequis">Prérequis</a>
+    <a href="#android">Android (Termux)</a>
+    <a href="#linux">Linux</a>
+    <a href="#windows">Windows</a>
+    <a href="#connexion">Connexion du compte</a>
+    <a href="#verification">Vérification</a>
+    <a href="#miseajour">Mise à jour</a>
+    <a href="#depannage">Dépannage</a>
+  </div>
+
+  <h2 id="prerequis">1. Ce qu'il vous faut</h2>
+  <div class="grille">
+    <div class="carte"><h3>Un compte DarkCodex</h3><p class="doux">Gratuit. Il se crée à la première connexion, avec Google ou un lien envoyé par email. <a href="/connexion">Créer mon compte</a></p></div>
+    <div class="carte"><h3>Python 3.10 ou plus récent</h3><p class="doux">Le programme est écrit en Python. Le guide ci-dessous vous dit comment l'installer.</p></div>
+    <div class="carte"><h3>Git</h3><p class="doux">Pour télécharger le projet depuis GitHub.</p></div>
+    <div class="carte"><h3>Une connexion Internet</h3><p class="doux">L'assistant fonctionne via le serveur DarkCodex : il faut être en ligne.</p></div>
+  </div>
+
+  <h2 id="android">2. Android avec Termux</h2>
+  <p>C'est l'installation recommandée sur téléphone.</p>
+  <div class="alerte att"><b>Important :</b> installez Termux depuis <b>F-Droid</b> (f-droid.org), pas depuis le Play Store. La version du Play Store n'est plus mise à jour et provoque des erreurs.</div>
+
+  <h3>Étape 1 — Préparer Termux</h3>
+  <pre><code>pkg update &amp;&amp; pkg upgrade -y
+pkg install -y python git</code></pre>
+
+  <h3>Étape 2 — Télécharger DarkCodex</h3>
+  <pre><code>git clone https://github.com/moussaram/DarkCodex.git
+cd DarkCodex</code></pre>
+
+  <h3>Étape 3 — Installer</h3>
+  <pre><code>pip install -r requirements.txt
+sh install.sh</code></pre>
+  <p>Le script crée les commandes <code>darkcodex</code> et <code>DarkCodex</code> et les ajoute à votre PATH. À la fin, il lance une vérification automatique.</p>
+
+  <h3>Étape 4 — Lancer</h3>
+  <pre><code>darkcodex</code></pre>
+  <p>Si Termux répond « command not found », fermez-le puis rouvrez-le, ou tapez :</p>
+  <pre><code>export PATH="$HOME/.local/bin:$PATH"</code></pre>
+
+  <h3>Facultatif — La dictée vocale</h3>
+  <p>Pour utiliser <code>/dicter</code>, installez l'application <b>Termux:API</b> (depuis F-Droid), puis dans Termux :</p>
+  <pre><code>pkg install -y termux-api</code></pre>
+
+  <h2 id="linux">3. Linux</h2>
+  <div class="alerte att">Le script <code>install.sh</code> est prévu pour Termux. Sous Linux, utilisez la méthode ci-dessous (environnement virtuel).</div>
+
+  <h3>Étape 1 — Installer Python et Git</h3>
+  <p>Exemple pour Debian ou Ubuntu :</p>
+  <pre><code>sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git</code></pre>
+
+  <h3>Étape 2 — Télécharger et préparer</h3>
+  <pre><code>git clone https://github.com/moussaram/DarkCodex.git ~/DarkCodex
+cd ~/DarkCodex
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt</code></pre>
+
+  <h3>Étape 3 — Créer la commande « darkcodex »</h3>
+  <pre><code>echo "alias darkcodex='PYTHONPATH=\$HOME/DarkCodex \$HOME/DarkCodex/.venv/bin/python -m darkcodex'" &gt;&gt; ~/.bashrc
+source ~/.bashrc</code></pre>
+
+  <h3>Étape 4 — Lancer</h3>
+  <pre><code>darkcodex</code></pre>
+
+  <h2 id="windows">4. Windows</h2>
+  <h3>Étape 1 — Installer Python et Git</h3>
+  <ol>
+    <li>Téléchargez Python 3 sur <b>python.org</b>. Pendant l'installation, <b>cochez « Add python.exe to PATH »</b>.</li>
+    <li>Téléchargez Git sur <b>git-scm.com</b> et installez-le avec les options par défaut.</li>
+  </ol>
+
+  <h3>Étape 2 — Télécharger DarkCodex</h3>
+  <p>Ouvrez <b>PowerShell</b> :</p>
+  <pre><code>git clone https://github.com/moussaram/DarkCodex.git
+cd DarkCodex
+pip install -r requirements.txt</code></pre>
+
+  <h3>Étape 3 — Installer</h3>
+  <pre><code>powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre>
+  <p>Le script crée les commandes <code>darkcodex.cmd</code> et <code>DarkCodex.cmd</code> dans <code>%USERPROFILE%\.local\bin</code> et ajoute ce dossier à votre PATH.</p>
+
+  <h3>Étape 4 — Lancer</h3>
+  <p><b>Fermez puis rouvrez</b> PowerShell (ou Windows Terminal), puis :</p>
+  <pre><code>darkcodex</code></pre>
+
+  <h2 id="connexion">5. Connecter votre compte</h2>
+  <p>DarkCodex fonctionne uniquement avec un compte : c'est ce qui vous donne accès à l'IA et à vos tokens.</p>
+  <ol>
+    <li>Dans le terminal, tapez <code>/login</code>. Il affiche un <b>code</b> de la forme <code>DARK-XXXX</code> et un lien.</li>
+    <li>Ouvrez ce lien dans votre navigateur (sur le même appareil ou un autre). C'est la page <a href="/device">Lier un appareil</a>.</li>
+    <li>Connectez-vous avec Google ou par lien email.</li>
+    <li>Entrez le code <code>DARK-XXXX</code> et validez.</li>
+    <li>Le terminal confirme la connexion : vous pouvez travailler.</li>
+  </ol>
+  <div class="alerte">Le code est valable quelques minutes. S'il expire, tapez à nouveau <code>/login</code> pour en obtenir un nouveau.</div>
+  <p>Vous recevez <b>5 000 tokens offerts</b> à l'inscription. Tapez <code>/solde</code> pour voir ce qu'il vous reste.</p>
+
+  <h2 id="verification">6. Vérifier que tout fonctionne</h2>
+  <pre><code>darkcodex doctor</code></pre>
+  <p>Cette commande contrôle votre installation. Puis, dans le chat :</p>
+  <pre><code>/status
+/solde</code></pre>
+  <p>Posez enfin une première question, par exemple « explique ce projet ». Si une réponse arrive, c'est prêt. Passez au <a href="/utilisation">guide d'utilisation</a>.</p>
+
+  <h2 id="miseajour">7. Mettre à jour DarkCodex</h2>
+  <pre><code>darkcodex update</code></pre>
+  <p>La commande vérifie s'il existe une nouvelle version et propose de l'installer. Vous pouvez aussi vérifier la version en ligne sur la page <a href="/statut">État du service</a>.</p>
+
+  <h2 id="depannage">8. Dépannage</h2>
+  <div class="defile"><table class="tableau">
+    <tr><th>Problème</th><th>Solution</th></tr>
+    <tr><td><code>command not found</code> (Termux/Linux)</td><td>Rouvrez le terminal, ou ajoutez le dossier au PATH : <code>export PATH="$HOME/.local/bin:$PATH"</code>.</td></tr>
+    <tr><td><code>darkcodex</code> introuvable (Windows)</td><td>Fermez et rouvrez PowerShell. Vérifiez que <code>%USERPROFILE%\.local\bin</code> est dans le PATH.</td></tr>
+    <tr><td><code>python</code> introuvable</td><td>Réinstallez Python en cochant « Add to PATH » (Windows) ou <code>pkg install python</code> (Termux).</td></tr>
+    <tr><td>La première réponse est très lente (jusqu'à 1 minute)</td><td>Normal : le serveur se réveille après une période d'inactivité. Les réponses suivantes sont rapides.</td></tr>
+    <tr><td>« Connexion requise » ou « Session expirée »</td><td>Tapez <code>/login</code> et refaites la liaison du compte.</td></tr>
+    <tr><td>Erreur 402 ou « tokens épuisés »</td><td>Votre solde est à 0. <a href="/abonnements">Rechargez votre compte</a>.</td></tr>
+    <tr><td>Le code <code>DARK-XXXX</code> est refusé</td><td>Il a peut-être expiré ou contient une faute. Générez-en un nouveau avec <code>/login</code>.</td></tr>
+    <tr><td>Autre erreur</td><td>Lancez <code>darkcodex doctor</code> : il indique ce qui ne va pas.</td></tr>
+  </table></div>
+
+  <h3>Désinstaller</h3>
+  <p>Supprimez le dossier <code>DarkCodex</code>, les commandes créées dans <code>~/.local/bin</code> (ou <code>%USERPROFILE%\.local\bin</code>) et, si vous le souhaitez, le dossier de données <code>~/.darkcodex</code>.</p>
+</main>
+</body>
+</html>

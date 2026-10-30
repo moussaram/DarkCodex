@@ -3,73 +3,93 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Abonnements — DarkCodex</title>
+  <title>Tarifs et abonnements — DarkCodex</title>
+  <meta name="description" content="Les tarifs DarkCodex : des packs de tokens sans engagement et sans expiration. Paiement sécurisé par mobile money ou carte.">
   <link rel="stylesheet" href="/static/site.css">
+  <script src="/static/nav.js" defer></script>
 </head>
 <body>
   <main>
-    <h1>Abonnements DarkCodex</h1>
-    <p class="doux" id="solde"></p>
-    <div class="grille" id="plans"></div>
+    <section class="hero" style="padding-bottom:8px">
+      <h1>Tarifs et abonnements</h1>
+      <p class="accroche">Des packs de tokens, sans engagement. Vous payez une fois, vos tokens n'expirent pas.</p>
+    </section>
+
+    <p class="doux" id="solde" style="text-align:center"></p>
     <div class="msg" id="msg"></div>
+    <div class="grille" id="plans"><p class="doux">Chargement des tarifs…</p></div>
+    <p style="text-align:center"><button class="secondaire cache" id="reessayer" type="button">Réessayer</button></p>
+
+    <h2>Comment ça marche</h2>
+    <ol class="etapes">
+      <li><b>Choisissez un pack</b>Starter pour débuter, Pro pour un usage régulier.</li>
+      <li><b>Connectez-vous</b>Avec le compte que vous utilisez dans le terminal.</li>
+      <li><b>Payez en sécurité</b>Sur la page de paiement : mobile money ou carte.</li>
+      <li><b>Utilisez vos tokens</b>Ils sont ajoutés automatiquement. Tapez <code>/solde</code> dans le terminal.</li>
+    </ol>
+
+    <h2>Ce qui est inclus</h2>
+    <div class="grille">
+      <div class="carte"><h3>Plan gratuit</h3><ul class="doux"><li>5 000 tokens offerts à l'inscription</li><li>Chat, agents fichiers, terminal, Git et tests</li><li>Mode <code>suggest</code> : vous confirmez chaque action</li></ul></div>
+      <div class="carte"><h3>Plans payants</h3><ul class="doux"><li>Beaucoup plus de tokens</li><li>Modes <code>autoedit</code> et <code>fullauto</code> débloqués tant qu'il reste des tokens</li><li>Aucune expiration, aucun renouvellement</li></ul></div>
+    </div>
+
+    <h2>Questions sur les paiements</h2>
+    <details><summary>Quels moyens de paiement sont acceptés ?</summary><p class="doux">Le paiement est géré par SasPay, un prestataire de paiement sécurisé : mobile money et carte selon votre pays. Les moyens exacts s'affichent sur la page de paiement.</p></details>
+    <details><summary>Mes tokens expirent-ils ?</summary><p class="doux">Non. Un pack acheté reste disponible jusqu'à ce que vous l'ayez utilisé.</p></details>
+    <details><summary>Je suis débité mais mes tokens ne sont pas arrivés.</summary><p class="doux">Patientez quelques minutes : le crédit est automatique. Revenez sur cette page, elle vérifie votre dernier paiement. Si rien n'arrive, vérifiez que vous êtes connecté avec le même compte que dans le terminal.</p></details>
+    <details><summary>Que se passe-t-il si j'achète deux fois ?</summary><p class="doux">Les tokens s'additionnent. Chaque paiement est crédité une seule fois.</p></details>
+    <details><summary>Mes coordonnées bancaires sont-elles stockées chez DarkCodex ?</summary><p class="doux">Non. Le paiement se fait sur la page de SasPay. DarkCodex reçoit seulement la confirmation du paiement.</p></details>
+    <p class="doux petit">Plus de réponses dans la <a href="/faq">FAQ</a> et dans les <a href="/legal">conditions</a>.</p>
   </main>
+
   <script type="module">
-    import { exigerConnexion, apiFetch } from "/static/auth.js";
+    import { getSession, apiFetch, memoriserRetour } from "/static/auth.js";
 
     const $ = (id) => document.getElementById(id);
-
     const nombre = (n) => Number(n).toLocaleString("fr-FR");
-
-    function message(texte, type) { const m = $("msg"); m.textContent = texte; m.className = "msg " + type; }
-
-    function element(balise, texte, classe) { const e = document.createElement(balise); if (texte !== undefined) e.textContent = texte; if (classe) e.className = classe; return e; }
-
+    const pause = (ms) => new Promise((r) => setTimeout(r, ms));
     const ATTENTE = ["pending", "processing", "created", "initiated", "open", "inconnu"];
 
-    const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+    function message(texte, type) { const m = $("msg"); m.textContent = texte; m.className = "msg " + type; }
+    function element(balise, texte, classe) { const e = document.createElement(balise); if (texte !== undefined) e.textContent = texte; if (classe) e.className = classe; return e; }
+
+    let session = null;
+    try { session = await getSession(); } catch (e) { session = null; }
 
     async function chargerSolde() {
+      if (!session) return null;
       const solde = await apiFetch("/solde").then((r) => r.json()).catch(() => null);
       if (solde && solde.tokens_solde !== undefined) {
-        $("solde").textContent = "Solde actuel : " + nombre(solde.tokens_solde) + " tokens (plan " + solde.plan + ")";
+        $("solde").textContent = "Votre solde : " + nombre(solde.tokens_solde) + " tokens (plan " + solde.plan + ")";
       }
       return solde;
     }
 
     async function verifierPaiement() {
-      message("Vérification du paiement en cours…", "");
+      message("Vérification du paiement en cours…", "ok");
       for (let essai = 0; essai < 14; essai++) {
         const id = localStorage.getItem("dk_paiement");
-        const reponse = await apiFetch("/confirmer-paiement", {
-          method: "POST",
-          body: JSON.stringify(id ? { session_id: id } : {}),
-        });
+        const reponse = await apiFetch("/confirmer-paiement", { method: "POST", body: JSON.stringify(id ? { session_id: id } : {}) });
         const data = await reponse.json().catch(() => ({}));
         const detail = data.detail && typeof data.detail === "object" ? data.detail : {};
         if (reponse.ok && (data.status === "confirme" || data.status === "deja_credite")) {
           localStorage.removeItem("dk_paiement");
           history.replaceState(null, "", location.pathname);
           await chargerSolde();
-          const soldeTexte = data.tokens_solde !== undefined
-            ? " Nouveau solde : " + nombre(data.tokens_solde) + " tokens."
-            : "";
-          message(
-            (data.status === "confirme" ? "✅ Paiement confirmé." : "Ce paiement a déjà été crédité.")
-              + soldeTexte + " Retournez dans DarkCodex et tapez /solde.",
-            "ok"
-          );
+          const soldeTexte = data.tokens_solde !== undefined ? " Nouveau solde : " + nombre(data.tokens_solde) + " tokens." : "";
+          message((data.status === "confirme" ? "✅ Paiement confirmé." : "Ce paiement a déjà été crédité.") + soldeTexte + " Retournez dans DarkCodex et tapez /solde.", "ok");
           return;
         }
         if (reponse.status === 402 && ATTENTE.includes(String(detail.etat))) { await pause(3000); continue; }
-        message(reponse.status === 402
-          ? "Le paiement n'a pas abouti (état : " + detail.etat + ")."
-          : "Vérification impossible pour le moment.", "ko");
+        message(reponse.status === 402 ? "Le paiement n'a pas abouti (état : " + detail.etat + ")." : "Vérification impossible pour le moment.", "ko");
         return;
       }
-      message("Paiement en cours de vérification : vos tokens arriveront automatiquement dans quelques minutes.", "");
+      message("Paiement en cours de vérification : vos tokens arriveront automatiquement dans quelques minutes.", "ok");
     }
 
     async function payer(plan, bouton) {
+      if (!session) { memoriserRetour("/abonnements"); location.href = "/connexion"; return; }
       bouton.disabled = true;
       try {
         const reponse = await apiFetch("/paiement/creer", { method: "POST", body: JSON.stringify({ plan }) });
@@ -77,39 +97,64 @@
         if (!reponse.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Impossible de lancer le paiement.");
         const lien = new URL(data.checkout_url);
         if (lien.protocol !== "https:") throw new Error("Lien de paiement invalide.");
-        localStorage.setItem("dk_paiement", data.session_id); // lu par /paiement/retour
+        localStorage.setItem("dk_paiement", data.session_id);
         location.href = lien.href;
       } catch (erreur) { message(String(erreur.message || erreur), "ko"); bouton.disabled = false; }
     }
 
-    const session = await exigerConnexion();
-
-    if (session) {
+    async function chargerPlans() {
+      const zone = $("plans");
+      $("reessayer").classList.add("cache");
       try {
-        const plans = await fetch("/plans").then((r) => r.json());
+        const reponse = await fetch("/plans");
+        if (!reponse.ok) throw new Error("plans");
+        const plans = await reponse.json();
+        if (!Array.isArray(plans) || !plans.length) throw new Error("vide");
+        zone.textContent = "";
+
+        const payants = plans.filter((p) => p.prix_fcfa > 0);
+        const prixMille = (p) => (p.prix_fcfa / p.tokens) * 1000;
+        const meilleur = payants.length > 1 ? payants.reduce((a, b) => (prixMille(b) < prixMille(a) ? b : a)) : null;
 
         for (const plan of plans) {
-          const carte = element("div", undefined, "carte");
-          carte.append(element("h2", plan.nom));
-          carte.append(element("p", plan.prix_fcfa > 0 ? nombre(plan.prix_fcfa) + " FCFA" : "Gratuit", "prix"));
-          carte.append(element("p", plan.description || (nombre(plan.tokens) + " tokens"), "doux"));
-
-          if (plan.prix_fcfa > 0) {
-            const bouton = element("button", "Payer");
+          const payant = plan.prix_fcfa > 0;
+          const carte = element("div", undefined, "carte plan" + (meilleur && plan.nom === meilleur.nom ? " populaire" : ""));
+          if (meilleur && plan.nom === meilleur.nom) carte.append(element("span", "Le plus avantageux", "badge"));
+          carte.append(element("h2", plan.nom.charAt(0).toUpperCase() + plan.nom.slice(1)));
+          carte.append(element("p", payant ? nombre(plan.prix_fcfa) + " FCFA" : "Gratuit", "prix"));
+          carte.append(element("p", nombre(plan.tokens) + " tokens", ""));
+          if (payant) carte.append(element("p", "≈ " + nombre(Math.round(prixMille(plan) * 10) / 10) + " FCFA pour 1 000 tokens", "doux petit"));
+          if (plan.description) carte.append(element("p", plan.description, "doux"));
+          const liste = document.createElement("ul");
+          if (payant) {
+            ["Paiement unique, sans abonnement", "Tokens sans date d'expiration", "Modes autoedit et fullauto"].forEach((t) => liste.append(element("li", t)));
+          } else {
+            ["Offerts à l'inscription", "Mode suggest"].forEach((t) => liste.append(element("li", t)));
+          }
+          carte.append(liste);
+          if (payant) {
+            const bouton = element("button", session ? "Acheter ce pack" : "Se connecter pour acheter");
             bouton.addEventListener("click", () => payer(plan.nom, bouton));
             carte.append(bouton);
-          } else carte.append(element("p", "Inclus à l'inscription", "doux"));
-
-          $("plans").append(carte);
+          } else {
+            const a = element("a", session ? "Compte actif" : "Créer mon compte", "bouton secondaire");
+            a.href = session ? "/compte" : "/connexion";
+            carte.append(a);
+          }
+          zone.append(carte);
         }
-      } catch (erreur) { message("Impossible de charger les plans.", "ko"); }
-
-      await chargerSolde();
-
-      // Retour de SasPay (?retour=1 ou session mémorisée) : vérification ~40 s.
-      if (new URLSearchParams(location.search).has("retour") || localStorage.getItem("dk_paiement")) {
-        await verifierPaiement();
+      } catch (erreur) {
+        zone.textContent = "";
+        zone.append(element("p", "Les tarifs sont momentanément indisponibles. Réessayez dans un instant.", "doux"));
+        $("reessayer").classList.remove("cache");
       }
+    }
+
+    $("reessayer").addEventListener("click", chargerPlans);
+    await chargerPlans();
+    if (session) {
+      await chargerSolde();
+      if (new URLSearchParams(location.search).has("retour") || localStorage.getItem("dk_paiement")) await verifierPaiement();
     }
   </script>
 </body>

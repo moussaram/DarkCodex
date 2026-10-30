@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Utilisation — DarkCodex</title>
+  <meta name="description" content="Guide d'utilisation de DarkCodex : démarrer, modes, commandes du chat, agents fichiers, terminal, Git, tests, tokens et parrainage.">
+  <link rel="stylesheet" href="/static/site.css">
+  <script src="/static/nav.js" defer></script>
+</head>
+<body>
+<main>
+  <h1>Guide d'utilisation</h1>
+  <p class="sous-titre">De la première question aux commandes avancées. DarkCodex est installé et votre compte est connecté ? C'est ici.</p>
+
+  <div class="sommaire">
+    <a href="#demarrer">Démarrer</a>
+    <a href="#modes">Les 3 modes</a>
+    <a href="#fichiers">Fichiers</a>
+    <a href="#terminal">Terminal</a>
+    <a href="#debug">Débogage</a>
+    <a href="#git">Git</a>
+    <a href="#tests">Tests</a>
+    <a href="#historique">Historique</a>
+    <a href="#sessions">Sessions et mémoire</a>
+    <a href="#compte">Compte et tokens</a>
+    <a href="#hors-chat">Hors du chat</a>
+    <a href="#conseils">Conseils</a>
+  </div>
+
+  <h2 id="demarrer">1. Démarrer</h2>
+  <p>Placez-vous dans le dossier de votre projet, puis lancez DarkCodex :</p>
+  <pre><code>cd mon-projet
+darkcodex</code></pre>
+  <p>Vous êtes dans le <b>chat</b>. Écrivez simplement votre demande en français :</p>
+  <pre><code>explique ce projet
+pourquoi mon test échoue ?
+ajoute une fonction qui valide un email</code></pre>
+  <p>Tapez <code>/help</code> à tout moment pour voir la liste des commandes, et <code>/exit</code> pour quitter.</p>
+  <div class="alerte">Première fois dans un projet ? Lancez <code>/projet .</code> : DarkCodex analyse les fichiers et comprend la structure avant de vous répondre.</div>
+
+  <h2 id="modes">2. Les trois modes</h2>
+  <p>Le mode décide de la liberté de DarkCodex sur vos fichiers et vos commandes.</p>
+  <div class="defile"><table class="tableau">
+    <tr><th>Mode</th><th>Comportement</th><th>Disponible pour</th></tr>
+    <tr><td><code>/mode suggest</code></td><td>Il propose, vous confirmez chaque action.</td><td>Tous les comptes</td></tr>
+    <tr><td><code>/mode autoedit</code></td><td>Il modifie automatiquement les fichiers.</td><td>Comptes avec un plan payant et des tokens</td></tr>
+    <tr><td><code>/mode fullauto</code></td><td>Autonomie totale : il enchaîne les actions, tout est affiché en direct.</td><td>Comptes avec un plan payant et des tokens</td></tr>
+  </table></div>
+  <p><code>/mode</code> sans argument affiche le mode actuel. Pour commencer, restez en <b>suggest</b>.</p>
+
+  <h2 id="fichiers">3. Travailler sur vos fichiers</h2>
+  <div class="defile"><table class="tableau">
+    <tr><th>Commande</th><th>Ce qu'elle fait</th></tr>
+    <tr><td><code>/projet [chemin]</code></td><td>Analyse un projet</td></tr>
+    <tr><td><code>/resume [dossier]</code></td><td>Résume un projet ou un dossier</td></tr>
+    <tr><td><code>/lire [fichier]</code></td><td>Lit et analyse un fichier</td></tr>
+    <tr><td><code>/expliquer [fichier]</code></td><td>Explique un fichier</td></tr>
+    <tr><td><code>/modifier [fichier] [message]</code></td><td>Modifie un fichier selon votre demande</td></tr>
+    <tr><td><code>/creer [fichier] [description]</code></td><td>Crée un nouveau fichier</td></tr>
+    <tr><td><code>/corriger [fichier]</code></td><td>Corrige un fichier, avec sauvegarde</td></tr>
+    <tr><td><code>/refactoriser [fichier]</code></td><td>Améliore le code sans changer son comportement</td></tr>
+  </table></div>
+  <p>Exemple :</p>
+  <pre><code>/modifier server/main.py "ajoute un contrôle d'erreur sur la route /solde"</code></pre>
+
+  <h2 id="terminal">4. Exécuter des commandes</h2>
+  <div class="defile"><table class="tableau">
+    <tr><th>Commande</th><th>Ce qu'elle fait</th></tr>
+    <tr><td><code>/run [commande]</code></td><td>Exécute une commande shell</td></tr>
+    <tr><td><code>/install</code></td><td>Installe les dépendances du projet</td></tr>
+    <tr><td><code>/build</code></td><td>Compile le projet</td></tr>
+    <tr><td><code>/start</code></td><td>Démarre le serveur du projet</td></tr>
+    <tr><td><code>/test</code></td><td>Lance les tests</td></tr>
+    <tr><td><code>/lint</code></td><td>Vérifie la qualité du code</td></tr>
+    <tr><td><code>/auto [description]</code></td><td>Enchaîne automatiquement les étapes nécessaires</td></tr>
+  </table></div>
+
+  <h2 id="debug">5. Déboguer et relire</h2>
+  <div class="defile"><table class="tableau">
+    <tr><th>Commande</th><th>Ce qu'elle fait</th></tr>
+    <tr><td><code>/debug [erreur]</code></td><td>Analyse un message d'erreur et propose une solution</td></tr>
+    <tr><td><code>/fix [fichier]</code></td><td>Corrige automatiquement un fichier</td></tr>
+    <tr><td><code>/review [fichier]</code></td><td>Fait une revue de code</td></tr>
+  </table></div>
+
+  <h2 id="git">6. Git</h2>
+  <div class="defile"><table class="tableau">
+    <tr><th>Commande</th><th>Ce qu'elle fait</th></tr>
+    <tr><td><code>/git status</code> · <code>/git diff</code> · <code>/git log</code> · <code>/git branches</code></td><td>Consulter l'état du dépôt</td></tr>
+    <tr><td><code>/git commit [message]</code></td><td>Enregistrer vos changements</td></tr>
+    <tr><td><code>/git push</code> · <code>/git pull</code></td><td>Envoyer vers GitHub ou récupérer les changements</td></tr>
+    <tr><td><code>/git branch [nom]</code></td><td>Créer ou changer de branche</td></tr>
+    <tr><td><code>/git explain [hash]</code></td><td>Expliquer un commit</td></tr>
+    <tr><td><code>/git resume</code></td><td>Résumer les changements en cours</td></tr>
+  </table></div>
+
+  <h2 id="tests">7. Tests</h2>
+  <div class="defile"><table class="tableau">
+    <tr><th>Commande</th><th>Ce qu'elle fait</th></tr>
+    <tr><td><code>/tests ecrire [fichier]</code></td><td>Génère des tests pour un fichier</td></tr>
+    <tr><td><code>/tests run</code></td><td>Lance tous les tests</td></tr>
+  </table></div>
+
+  <h2 id="historique">8. Historique, annulation et coût</h2>
+  <div class="defile"><table class="tableau">
+    <tr><th>Commande</th><th>Ce qu'elle fait</th></tr>
+    <tr><td><code>/historique</code></td><td>Liste les dernières modifications de fichiers</td></tr>
+    <tr><td><code>/annuler</code></td><td>Annule la dernière modification</td></tr>
+    <tr><td><code>/diff [fichier]</code></td><td>Montre ce qui a changé</td></tr>
+    <tr><td><code>/cout</code></td><td>Affiche les tokens utilisés pendant la session</td></tr>
+    <tr><td><code>/limite [nombre|off]</code></td><td>Fixe un plafond de tokens pour la session, ou le désactive</td></tr>
+  </table></div>
+  <div class="alerte att">Avant un gros changement, pensez à enregistrer votre travail avec Git : vous pourrez toujours revenir en arrière.</div>
+
+  <h2 id="sessions">9. Sessions, mémoire et langue</h2>
+  <div class="defile"><table class="tableau">
+    <tr><th>Commande</th><th>Ce qu'elle fait</th></tr>
+    <tr><td><code>/session save [nom]</code></td><td>Sauvegarde la session en cours</td></tr>
+    <tr><td><code>/session list</code></td><td>Liste vos sessions</td></tr>
+    <tr><td><code>/session resume [nom]</code></td><td>Reprend une session</td></tr>
+    <tr><td><code>/init</code></td><td>Génère un fichier <code>AGENTS.md</code> de consignes pour le projet</td></tr>
+    <tr><td><code>/memory CLÉ VALEUR</code></td><td>Mémorise une information durable (ex. <code>/memory style "réponses concises"</code>)</td></tr>
+    <tr><td><code>/memoire</code> · <code>/oublier</code></td><td>Lit ou efface la mémoire</td></tr>
+    <tr><td><code>/contexte [texte]</code></td><td>Définit le contexte du projet</td></tr>
+    <tr><td><code>/langues</code> · <code>/langue [code]</code></td><td>Liste ou change la langue</td></tr>
+    <tr><td><code>/traduire [texte]</code></td><td>Traduit vers la langue active</td></tr>
+    <tr><td><code>/dicter</code></td><td>Dicte votre message à la voix (Termux:API requis)</td></tr>
+    <tr><td><code>/clear</code></td><td>Efface l'écran</td></tr>
+  </table></div>
+
+  <h2 id="compte">10. Compte, tokens et parrainage</h2>
+  <div class="defile"><table class="tableau">
+    <tr><th>Commande</th><th>Ce qu'elle fait</th></tr>
+    <tr><td><code>/login</code></td><td>Connecte le terminal à votre compte</td></tr>
+    <tr><td><code>/logout</code></td><td>Déconnecte le terminal</td></tr>
+    <tr><td><code>/solde</code></td><td>Affiche votre plan et vos tokens restants</td></tr>
+    <tr><td><code>/plans</code></td><td>Affiche les plans et le lien d'achat</td></tr>
+    <tr><td><code>/status</code></td><td>Affiche l'état de votre compte et de la session</td></tr>
+    <tr><td><code>/parrainer</code></td><td>Affiche votre code de parrainage</td></tr>
+    <tr><td><code>/parrainer utiliser DK-XXXXXX</code></td><td>Utilise le code d'un ami (dans les premiers jours du compte)</td></tr>
+  </table></div>
+  <h3>Qu'est-ce qu'un token ?</h3>
+  <p>Un token mesure la quantité de texte échangée avec l'IA : vos questions, le contexte envoyé et ses réponses. Plus vos échanges sont longs, plus ils consomment. Chaque réponse retire des tokens de votre solde.</p>
+  <h3>Quand le solde est à 0</h3>
+  <p>Le terminal affiche un message avec le lien de recharge. Rendez-vous sur la page <a href="/abonnements">Tarifs</a>, achetez un pack, puis tapez <code>/solde</code> : vos nouveaux tokens sont déjà là.</p>
+
+  <h2 id="hors-chat">11. Commandes en une ligne (hors du chat)</h2>
+  <p>Vous pouvez aussi utiliser DarkCodex sans ouvrir le chat :</p>
+  <div class="defile"><table class="tableau">
+    <tr><th>Commande</th><th>Ce qu'elle fait</th></tr>
+    <tr><td><code>darkcodex chat</code></td><td>Ouvre le chat (comme <code>darkcodex</code> seul)</td></tr>
+    <tr><td><code>darkcodex ask "explique ce projet" --context</code></td><td>Pose une question ponctuelle avec le contexte du projet</td></tr>
+    <tr><td><code>darkcodex scan --limit 40</code></td><td>Liste les fichiers utilisés comme contexte</td></tr>
+    <tr><td><code>darkcodex init</code></td><td>Crée les notes DarkCodex locales du projet</td></tr>
+    <tr><td><code>darkcodex memory add style "répondre en français" --tags preference</code></td><td>Ajoute une information à la mémoire</td></tr>
+    <tr><td><code>darkcodex memory search français</code></td><td>Recherche dans la mémoire</td></tr>
+    <tr><td><code>darkcodex run COMMANDE</code></td><td>Exécute et journalise une commande dans le projet</td></tr>
+    <tr><td><code>darkcodex doctor</code></td><td>Vérifie l'installation</td></tr>
+    <tr><td><code>darkcodex update</code></td><td>Met à jour DarkCodex</td></tr>
+  </table></div>
+
+  <h2 id="conseils">12. Conseils pour de meilleurs résultats</h2>
+  <ul>
+    <li><b>Soyez précis.</b> « Corrige le bug de connexion dans auth.py » donne un meilleur résultat que « ça ne marche pas ».</li>
+    <li><b>Donnez le contexte.</b> Lancez <code>/projet .</code> en début de session et utilisez <code>/contexte</code> pour décrire le projet.</li>
+    <li><b>Avancez par petites étapes.</b> Une tâche à la fois, puis <code>/tests run</code> pour vérifier.</li>
+    <li><b>Gardez le contrôle.</b> Restez en mode <code>suggest</code> tant que vous découvrez l'outil.</li>
+    <li><b>Surveillez vos tokens.</b> <code>/cout</code> et <code>/limite</code> évitent les mauvaises surprises.</li>
+    <li><b>Relisez toujours.</b> L'IA peut se tromper : relisez les modifications avec <code>/diff</code> avant de les enregistrer avec Git.</li>
+  </ul>
+  <p class="doux">Une question ? Consultez la <a href="/faq">FAQ</a>.</p>
+</main>
+</body>
+</html>

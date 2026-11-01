@@ -2,14 +2,14 @@ import os
 import unittest
 from unittest import mock
 
-from darkcodex import navigateur
+from darkcodex import cli, navigateur
 
 
 class NavigateurTests(unittest.TestCase):
     def test_refuse_les_urls_dangereuses(self):
         for url in ("--help", "file:///etc/passwd", "javascript:alert(1)", "https://a b", "", None):
             self.assertFalse(navigateur.url_sure(url), url)
-        self.assertTrue(navigateur.url_sure("https://darkcodex.onrender.com/device?code=DARK-AAAA-BBBB"))
+        self.assertTrue(navigateur.url_sure(f"{cli.API_BASE}/device?code=DARK-AAAA-BBBB"))
 
     def test_desactivation_par_variable(self):
         with mock.patch.dict(os.environ, {"DARKCODEX_NO_BROWSER": "1"}), mock.patch.object(

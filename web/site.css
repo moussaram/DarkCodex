@@ -28,6 +28,23 @@ button:disabled { opacity:.6; cursor:wait; }
 .onglets button { flex:1; }
 .cache { display:none !important; }
 
+/* ── Tableau de bord (compte) ── */
+.statut-ok{color:var(--accent)}
+.statut-ko{color:var(--danger)}
+.statut-attente{color:#f5b942}
+.carte .grille{gap:12px}
+.carte .grille .carte{margin:0}
+.ligne-appareil{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;background:var(--fond);border:1px solid var(--bord);border-radius:10px;padding:.6em .9em;margin:.5em 0}
+.ligne-appareil .doux{font-size:.9rem}
+@media (max-width:640px){
+  h1{font-size:1.55rem}
+  .hero h1{font-size:1.8rem}
+  .tableau{font-size:.88rem}
+  .tableau th,.tableau td{padding:7px 6px}
+  button,.bouton{width:auto;min-height:44px}
+  .ligne-appareil{flex-direction:column;align-items:flex-start}
+}
+
 /* ── En-tête et pied de page (injectés par /static/nav.js) ── */
 .entete { position:sticky; top:0; z-index:50; background:var(--fond); border-bottom:1px solid var(--bord); backdrop-filter:blur(6px); }
 .entete-in { max-width:1100px; margin:0 auto; padding:10px 16px; display:flex; align-items:center; gap:16px; }

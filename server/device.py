@@ -19,94 +19,24 @@ import requests
 CODE_TTL_SECONDS = 600  # 10 minutes exactement
 CODE_TTL_MINUTES = 10
 POLL_INTERVAL_SECONDS = 5
-DEVICE_PAGE_URL = os.environ.get("DARKCODEX_DEVICE_URL", "https://darkcodex.onrender.com/device")
 
-PLAN_CATALOG: dict[str, dict[str, Any]] = {
-    "free": {
-        "nom": "free",
-        "tokens": 10000,
-        "prix_fcfa": 0,
-        "description": "10 000 tokens offerts — plan gratuit",
-        "quota_mensuel": 10000,
-        "facturation": "gratuit",
-        "personnalise": False,
-    },
-    "starter": {
-        "nom": "starter",
-        "tokens": 300000,
-        "prix_fcfa": 2500,
-        "description": "300 000 tokens par mois",
-        "quota_mensuel": 300000,
-        "facturation": "mensuel",
-        "personnalise": False,
-    },
-    "pro": {
-        "nom": "pro",
-        "tokens": 1000000,
-        "prix_fcfa": 5000,
-        "description": "1 000 000 tokens par mois",
-        "quota_mensuel": 1000000,
-        "facturation": "mensuel",
-        "personnalise": False,
-    },
-    "business": {
-        "nom": "business",
-        "tokens": 3000000,
-        "prix_fcfa": 12500,
-        "description": "3 000 000 tokens par mois",
-        "quota_mensuel": 3000000,
-        "facturation": "mensuel",
-        "personnalise": False,
-    },
-    "enterprise": {
-        "nom": "enterprise",
-        "tokens": 0,
-        "prix_fcfa": 0,
-        "description": "Quota personnalisé — devis sur mesure",
-        "quota_mensuel": 0,
-        "facturation": "devis",
-        "personnalise": True,
-    },
-}
+# Adresse publique du serveur : variable perso, sinon celle que Render fournit
+# automatiquement (RENDER_EXTERNAL_URL), sinon le domaine de production.
+PUBLIC_URL = (
+    os.environ.get("DARKCODEX_PUBLIC_URL")
+    or os.environ.get("RENDER_EXTERNAL_URL")
+    or "https://darkcodex-technicien.onrender.com"
+).strip().rstrip("/")
+DEVICE_PAGE_URL = os.environ.get("DARKCODEX_DEVICE_URL", PUBLIC_URL + "/device")
 
-
-def plan_catalog() -> dict[str, dict[str, Any]]:
-    return {nom: {**plan} for nom, plan in PLAN_CATALOG.items()}
+# Colonnnes réellement présentes dans la table plans (aucune autre).
+PLAN_COLONNES = "nom,tokens,prix_fcfa,description"
 
 
 def normaliser_plan(nom: str | None) -> str:
-    nom = (nom or "").strip().lower()
-    return nom if nom in PLAN_CATALOG else "free"
-
-
-def plan_est_personnalise(nom: str | None) -> bool:
-    return bool(PLAN_CATALOG.get(normaliser_plan(nom), {}).get("personnalise"))
-
-
-def _date_from_value(valeur: Any) -> dt.datetime | None:
-    if not valeur:
-        return None
-    if isinstance(valeur, dt.datetime):
-        return valeur
-    chaine = str(valeur).strip()
-    if not chaine:
-        return None
-    if chaine.endswith("Z"):
-        chaine = chaine[:-1] + "+00:00"
-    try:
-        dt_obj = dt.datetime.fromisoformat(chaine)
-    except ValueError:
-        return None
-    if dt_obj.tzinfo is None:
-        dt_obj = dt_obj.replace(tzinfo=dt.timezone.utc)
-    return dt_obj.astimezone(dt.timezone.utc)
-
-
-def est_abonnement_expire(date_expiration: Any) -> bool:
-    expiration = _date_from_value(date_expiration)
-    if expiration is None:
-        return False
-    return expiration <= dt.datetime.now(dt.timezone.utc)
+    """Nom de plan en minuscules ; « gratuit » par défaut. Pas de liste en dur :
+    la table plans décide quels plans existent."""
+    return (nom or "").strip().lower() or "gratuit"
 
 
 def supabase_url() -> str:
@@ -254,7 +184,6 @@ def verifier_code(code: str) -> dict[str, Any]:
     return {
         "status": "confirme",
         "token": row.get("token"),
-        "refresh_token": row.get("refresh_token"),
         "user_id": session["user_id"],
         "email": session["email"],
         "nom": session["nom"],
@@ -263,10 +192,8 @@ def verifier_code(code: str) -> dict[str, Any]:
     }
 
 
-def confirmer_code(code: str, user_id: str, token: str, refresh_token: str | None = None) -> bool:
+def confirmer_code(code: str, user_id: str, token: str) -> bool:
     corps: dict[str, Any] = {"confirme": True, "user_id": user_id, "token": token}
-    if refresh_token:
-        corps["refresh_token"] = refresh_token
     response = requests.patch(
         rest_url(
             "device_codes",
@@ -337,8 +264,12 @@ def revoquer_appareil(token: str) -> bool:
     """Révoque un jeton d'appareil (déconnexion). Ignore les jetons qui n'en sont pas."""
     if not (token or "").startswith(APPAREIL_PREFIX):
         return False
+    return _revoquer({"token_hash": f"eq.{_empreinte(token)}"})
+
+
+def _revoquer(params: dict[str, str]) -> bool:
     response = requests.patch(
-        rest_url("appareils", {"token_hash": f"eq.{_empreinte(token)}"}),
+        rest_url("appareils", params),
         headers=service_headers({"Prefer": "return=representation"}),
         json={"revoque": True},
         timeout=20,
@@ -349,6 +280,42 @@ def revoquer_appareil(token: str) -> bool:
         return bool(response.json())
     except ValueError:
         return False
+
+
+def lister_appareils(user_id: str) -> list[dict[str, Any]]:
+    """Appareils d'UN utilisateur. L'empreinte du jeton n'est jamais renvoyée."""
+    response = requests.get(
+        rest_url(
+            "appareils",
+            {
+                "user_id": f"eq.{user_id}",
+                "select": "id,nom,email,revoque,cree_a",
+                "order": "cree_a.desc",
+                "limit": "50",
+            },
+        ),
+        headers=service_headers(),
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase appareils (select): HTTP {response.status_code}")
+    rows = response.json()
+    return rows if isinstance(rows, list) else []
+
+
+def appareil_de_token(token: str) -> dict[str, Any] | None:
+    """Appareil auquel appartient CE jeton (sans son empreinte)."""
+    if not (token or "").startswith(APPAREIL_PREFIX):
+        return None
+    row = lire_appareil(token)
+    if not row:
+        return None
+    return {cle: row.get(cle) for cle in ("id", "nom", "email", "revoque", "cree_a")}
+
+
+def revoquer_appareil_de(user_id: str, appareil_id: str) -> bool:
+    """Révoque UN appareil : seulement s'il appartient à cet utilisateur."""
+    return _revoquer({"id": f"eq.{appareil_id}", "user_id": f"eq.{user_id}"})
 
 
 def code_en_attente(code: str) -> bool:
@@ -378,265 +345,65 @@ def supprimer_code(code: str) -> bool:
     return response.ok
 
 
-def rafraichir_session(refresh_token: str) -> dict[str, Any] | None:
-    """Échange un refresh_token Supabase contre un nouveau couple de jetons."""
-    refresh_token = (refresh_token or "").strip()
-    if not refresh_token:
-        return None
-    cle = os.environ.get("SUPABASE_ANON_KEY", "").strip() or service_key()
-    try:
-        response = requests.post(
-            f"{supabase_url()}/auth/v1/token",
-            params={"grant_type": "refresh_token"},
-            headers={"apikey": cle, "Content-Type": "application/json"},
-            json={"refresh_token": refresh_token},
-            timeout=20,
-        )
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Supabase auth injoignable: {exc}") from exc
-    if response.status_code in (400, 401, 403):
-        return None
-    if not response.ok:
-        raise RuntimeError(f"Supabase auth (refresh): HTTP {response.status_code}")
-    data = response.json()
-    if not data.get("access_token") or not data.get("refresh_token"):
-        return None
-    return {
-        "access_token": data["access_token"],
-        "refresh_token": data["refresh_token"],
-        "expires_in": int(data.get("expires_in") or 3600),
-    }
-
-
-# ── Plans et abonnements ──────────────────────────────────────
-
-
-def _plan_extra_defaut(nom: str | None) -> dict[str, Any]:
-    return {**PLAN_CATALOG.get(normaliser_plan(nom), PLAN_CATALOG["free"])}
+# ── Plans ──────────────────────────────────────────────────────
 
 
 def lister_plans() -> list[dict[str, Any]]:
-    """Retourne les plans pour le site, y compris le plan gratuit."""
+    """Plans du site, lus UNIQUEMENT dans la table plans (gratuit inclus).
+
+    Pas de catalogue de secours : mieux vaut une erreur qu'un faux prix.
+    """
     try:
         response = requests.get(
-            rest_url(
-                "plans",
-                {
-                    "select": "nom,tokens,prix_fcfa,description,quota_mensuel,facturation,personnalise",
-                    "order": "prix_fcfa.asc",
-                },
-            ),
+            rest_url("plans", {"select": PLAN_COLONNES, "order": "prix_fcfa.asc"}),
             headers=service_headers(),
             timeout=20,
         )
-    except requests.RequestException:
-        return list(plan_catalog().values())
-
-    if response.ok:
-        rows = response.json()
-        if isinstance(rows, list) and rows:
-            rows = [dict(r) for r in rows]
-            for row in rows:
-                if "nom" in row:
-                    row["nom"] = str(row["nom"]).strip().lower()
-                    plan = PLAN_CATALOG.get(row["nom"])
-                    if plan is not None:
-                        row.setdefault("tokens", plan["tokens"])
-                        row.setdefault("prix_fcfa", plan["prix_fcfa"])
-                        row.setdefault("quota_mensuel", plan["quota_mensuel"])
-                        row.setdefault("facturation", plan["facturation"])
-                        row.setdefault("personnalise", plan["personnalise"])
-            return rows
-    return list(plan_catalog().values())
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Supabase plans injoignable: {exc}") from exc
+    if not response.ok:
+        raise RuntimeError(f"Supabase plans: HTTP {response.status_code}")
+    rows = response.json()
+    return [dict(ligne) for ligne in rows] if isinstance(rows, list) else []
 
 
 def lire_plan(nom: str | None) -> dict[str, Any] | None:
+    """Un plan de la table plans, ou None s'il n'existe pas."""
     plan_nom = normaliser_plan(nom)
-    fallback = PLAN_CATALOG.get(plan_nom)
-    if not fallback:
-        return None
     try:
         response = requests.get(
-            rest_url("plans", {"nom": f"eq.{plan_nom}", "select": "*", "limit": "1"}),
+            rest_url("plans", {"nom": f"eq.{plan_nom}", "select": PLAN_COLONNES, "limit": "1"}),
             headers=service_headers(),
             timeout=20,
         )
-    except requests.RequestException:
-        return {**fallback}
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Supabase plans injoignable: {exc}") from exc
     if not response.ok:
-        return {**fallback}
+        raise RuntimeError(f"Supabase plans: HTTP {response.status_code}")
     rows = response.json()
-    if not isinstance(rows, list) or not rows:
-        return {**fallback}
-    row = dict(rows[0])
-    row["nom"] = str(row.get("nom") or plan_nom).strip().lower()
-    row.setdefault("tokens", fallback["tokens"])
-    row.setdefault("prix_fcfa", fallback["prix_fcfa"])
-    row.setdefault("quota_mensuel", fallback["quota_mensuel"])
-    row.setdefault("facturation", fallback["facturation"])
-    row.setdefault("personnalise", fallback["personnalise"])
-    return row
+    return dict(rows[0]) if isinstance(rows, list) and rows else None
 
 
-def lister_abonnements(user_id: str, limite: int = 10) -> list[dict[str, Any]]:
-    try:
-        response = requests.get(
-            rest_url(
-                "abonnements",
-                {"user_id": f"eq.{user_id}", "select": "*", "order": "date_debut.desc", "limit": str(limite)},
-            ),
-            headers=service_headers(),
-            timeout=20,
-        )
-    except requests.RequestException:
-        return []
+def lister_achats(user_id: str, limite: int = 50) -> list[dict[str, Any]]:
+    """Historique des achats d'UN utilisateur (table achats)."""
+    response = requests.get(
+        rest_url(
+            "achats",
+            {"user_id": f"eq.{user_id}", "select": "*", "order": "date_achat.desc", "limit": str(limite)},
+        ),
+        headers=service_headers(),
+        timeout=20,
+    )
     if not response.ok:
-        return []
+        raise RuntimeError(f"Supabase achats (select): HTTP {response.status_code}")
     rows = response.json()
     return rows if isinstance(rows, list) else []
-
-
-def lister_transactions(user_id: str, limite: int = 10) -> list[dict[str, Any]]:
-    try:
-        response = requests.get(
-            rest_url(
-                "transactions",
-                {"user_id": f"eq.{user_id}", "select": "*", "order": "cree_a.desc", "limit": str(limite)},
-            ),
-            headers=service_headers(),
-            timeout=20,
-        )
-    except requests.RequestException:
-        return []
-    if not response.ok:
-        return []
-    rows = response.json()
-    return rows if isinstance(rows, list) else []
-
-
-def creer_abonnement(user_id: str, plan_nom: str, tokens: int, montant_fcfa: int, session_id: str) -> dict[str, Any]:
-    plan = lire_plan(plan_nom) or _plan_extra_defaut(plan_nom)
-    payload = {
-        "user_id": user_id,
-        "plan": str(plan.get("nom") or plan_nom).lower(),
-        "quota_mensuel": int(plan.get("quota_mensuel") or max(0, int(tokens))),
-        "prix_fcfa": int(montant_fcfa),
-        "statut": "actif",
-        "date_debut": now_iso(),
-        "date_expiration": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).isoformat(timespec="seconds"),
-        "date_renouvellement": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).isoformat(timespec="seconds"),
-        "derniere_transaction_id": session_id,
-        "session_paiement": session_id,
-    }
-    response = requests.post(
-        rest_url("abonnements"),
-        headers=service_headers({"Prefer": "return=representation"}),
-        json=payload,
-        timeout=20,
-    )
-    if not response.ok:
-        raise RuntimeError(f"Supabase abonnements (insert): HTTP {response.status_code} {response.text[:300]}")
-    rows = response.json()
-    return rows[0] if isinstance(rows, list) and rows else payload
-
-
-def maj_abonnement(user_id: str, *, plan_nom: str, date_expiration: Any | None = None, statut: str = "actif") -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "plan": normaliser_plan(plan_nom),
-        "statut": statut,
-        "maj_a": now_iso(),
-    }
-    if date_expiration is not None:
-        payload["date_expiration"] = str(date_expiration)
-    response = requests.patch(
-        rest_url("abonnements", {"user_id": f"eq.{user_id}", "select": "*"}),
-        headers=service_headers({"Prefer": "return=representation"}),
-        json=payload,
-        timeout=20,
-    )
-    if not response.ok:
-        raise RuntimeError(f"Supabase abonnements (update): HTTP {response.status_code} {response.text[:300]}")
-    rows = response.json()
-    return rows[0] if isinstance(rows, list) and rows else payload
-
-
-def renouveler_abonnement(user_id: str, plan_nom: str, *, montant_fcfa: int = 0, session_id: str | None = None) -> dict[str, Any]:
-    plan = lire_plan(plan_nom) or _plan_extra_defaut(plan_nom)
-    nouvelle_expiration = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).isoformat(timespec="seconds")
-    payload = {
-        "plan": normaliser_plan(plan_nom),
-        "quota_mensuel": int(plan.get("quota_mensuel") or 0),
-        "prix_fcfa": int(montant_fcfa or int(plan.get("prix_fcfa") or 0)),
-        "statut": "actif",
-        "date_renouvellement": nouvelle_expiration,
-        "date_expiration": nouvelle_expiration,
-        "maj_a": now_iso(),
-    }
-    if session_id:
-        payload["session_paiement"] = session_id
-    response = requests.patch(
-        rest_url("abonnements", {"user_id": f"eq.{user_id}", "statut": "eq.actif", "select": "*"}),
-        headers=service_headers({"Prefer": "return=representation"}),
-        json=payload,
-        timeout=20,
-    )
-    if response.status_code == 406:
-        response = requests.post(
-            rest_url("abonnements"),
-            headers=service_headers({"Prefer": "return=representation"}),
-            json={
-                "user_id": user_id,
-                "plan": normaliser_plan(plan_nom),
-                "quota_mensuel": int(plan.get("quota_mensuel") or 0),
-                "prix_fcfa": int(montant_fcfa or int(plan.get("prix_fcfa") or 0)),
-                "statut": "actif",
-                "date_debut": now_iso(),
-                "date_expiration": nouvelle_expiration,
-                "date_renouvellement": nouvelle_expiration,
-                "session_paiement": session_id or "",
-            },
-            timeout=20,
-        )
-    if not response.ok:
-        raise RuntimeError(f"Supabase abonnements (renew): HTTP {response.status_code} {response.text[:300]}")
-    rows = response.json()
-    return rows[0] if isinstance(rows, list) and rows else payload
-
-
-def enregistrer_transaction(
-    user_id: str,
-    plan: str,
-    montant_fcfa: int,
-    tokens_total: int,
-    session_id: str | None = None,
-    statut: str = "confirme",
-    type_transaction: str = "abonnement",
-) -> dict[str, Any]:
-    payload = {
-        "user_id": user_id,
-        "plan": normaliser_plan(plan),
-        "montant_fcfa": int(montant_fcfa),
-        "tokens_total": int(tokens_total),
-        "session_id": session_id or "",
-        "statut": statut,
-        "type_transaction": type_transaction,
-        "metadata": {"session_id": session_id or ""},
-    }
-    response = requests.post(
-        rest_url("transactions"),
-        headers=service_headers({"Prefer": "return=representation"}),
-        json=payload,
-        timeout=20,
-    )
-    if not response.ok:
-        raise RuntimeError(f"Supabase transactions (insert): HTTP {response.status_code} {response.text[:300]}")
-    rows = response.json()
-    return rows[0] if isinstance(rows, list) and rows else payload
 
 
 def enregistrer_achat(
     user_id: str, plan: str, tokens_ajoutes: int, montant_fcfa: int, transaction_id: str
 ) -> None:
+    """Historique des achats (table achats). Un doublon (409) n'est pas une erreur."""
     response = requests.post(
         rest_url("achats"),
         headers=service_headers({"Prefer": "return=minimal"}),
@@ -651,10 +418,6 @@ def enregistrer_achat(
     )
     if not response.ok and response.status_code != 409:
         raise RuntimeError(f"Supabase achats (insert): HTTP {response.status_code} {response.text[:300]}")
-    try:
-        enregistrer_transaction(user_id, plan, montant_fcfa, tokens_ajoutes, transaction_id, "confirme", "abonnement")
-    except Exception:
-        pass
 
 
 # ── Auth Supabase + profils ────────────────────────────────────
@@ -676,12 +439,8 @@ def verifier_token(token: str) -> dict[str, Any] | None:
             "email": str(appareil.get("email") or profil.get("email") or ""),
             "nom": str(appareil.get("nom") or profil.get("nom") or ""),
             "tokens_solde": int(profil.get("tokens_solde") or 0),
-            "tokens_utilises": int(profil.get("tokens_utilises") or 0),
-            "plan": str(profil.get("plan") or "free"),
-            "quota_mensuel": int(profil.get("quota_mensuel") or 0),
-            "date_expiration_abonnement": profil.get("date_expiration_abonnement"),
-            "statut_abonnement": profil.get("statut_abonnement") or "inactif",
-        }
+            "tokens_utilises": int(profil.get("tokens_utilises") or 0),        "plan": str(profil.get("plan") or "gratuit"),
+    }
     try:
         response = requests.get(
             f"{supabase_url()}/auth/v1/user",
@@ -708,10 +467,7 @@ def verifier_token(token: str) -> dict[str, Any] | None:
         "nom": str(profil.get("nom") or meta.get("full_name") or meta.get("name") or ""),
         "tokens_solde": int(profil.get("tokens_solde") or 0),
         "tokens_utilises": int(profil.get("tokens_utilises") or 0),
-        "plan": str(profil.get("plan") or "free"),
-        "quota_mensuel": int(profil.get("quota_mensuel") or 0),
-        "date_expiration_abonnement": profil.get("date_expiration_abonnement"),
-        "statut_abonnement": profil.get("statut_abonnement") or "inactif",
+        "plan": str(profil.get("plan") or "gratuit"),
     }
 
 
@@ -824,6 +580,22 @@ def paiements_en_attente(limite: int = 30, depuis_minutes: int = 4320) -> list[d
                 "order": "cree_a.desc",
                 "limit": str(limite),
             },
+        ),
+        headers=service_headers(),
+        timeout=20,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase paiements (select): HTTP {response.status_code}")
+    rows = response.json()
+    return rows if isinstance(rows, list) else []
+
+
+def paiements_de(user_id: str, limite: int = 100) -> list[dict[str, Any]]:
+    """Paiements d'UN utilisateur (statuts des achats du compte)."""
+    response = requests.get(
+        rest_url(
+            "paiements",
+            {"user_id": f"eq.{user_id}", "select": "*", "order": "cree_a.desc", "limit": str(limite)},
         ),
         headers=service_headers(),
         timeout=20,
@@ -956,87 +728,6 @@ def utiliser_parrainage(user_id: str, code: str, bonus: int, max_filleuls: int, 
 
 
 # ── Débit atomique (fonction SQL debiter_tokens, supabase_correctifs.sql) ────
-
-
-def activer_abonnement(user_id: str, plan_nom: str, montant_fcfa: int, tokens: int, session_id: str | None = None) -> dict[str, Any]:
-    """Crée/actualise l'abonnement mensuel et synchronise les champs du profil."""
-    plan = lire_plan(plan_nom) or _plan_extra_defaut(plan_nom)
-    plan_nom = normaliser_plan(plan.get("nom") or plan_nom)
-    expiration = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).isoformat(timespec="seconds")
-    profil = {
-        "plan": plan_nom,
-        "quota_mensuel": int(plan.get("quota_mensuel") or max(0, int(tokens))),
-        "statut_abonnement": "actif",
-        "date_expiration_abonnement": expiration,
-        "date_dernier_renouvellement": now_iso(),
-        "date_dernier_paiement": now_iso(),
-    }
-    try:
-        profils = maj_profil(user_id, profil)
-    except RuntimeError:
-        profils = {}
-
-    abonnement = {
-        "user_id": user_id,
-        "plan": plan_nom,
-        "quota_mensuel": int(plan.get("quota_mensuel") or max(0, int(tokens))),
-        "prix_fcfa": int(montant_fcfa),
-        "statut": "actif",
-        "date_debut": now_iso(),
-        "date_expiration": expiration,
-        "date_renouvellement": expiration,
-        "derniere_transaction_id": session_id or "",
-        "session_paiement": session_id or "",
-    }
-    response = requests.post(
-        rest_url("abonnements"),
-        headers=service_headers({"Prefer": "return=representation"}),
-        json=abonnement,
-        timeout=20,
-    )
-    if response.status_code == 409:
-        try:
-            retour = requests.patch(
-                rest_url("abonnements", {"user_id": f"eq.{user_id}", "order": "date_debut.desc", "limit": "1"}),
-                headers=service_headers({"Prefer": "return=representation"}),
-                json={
-                    "plan": plan_nom,
-                    "quota_mensuel": abonnement["quota_mensuel"],
-                    "prix_fcfa": abonnement["prix_fcfa"],
-                    "statut": "actif",
-                    "date_expiration": expiration,
-                    "date_renouvellement": expiration,
-                    "maj_a": now_iso(),
-                },
-                timeout=20,
-            )
-            if retour.ok:
-                rows = retour.json();
-                if isinstance(rows, list) and rows:
-                    return rows[0]
-        except Exception:
-            pass
-    elif not response.ok:
-        raise RuntimeError(f"Supabase abonnements (insert): HTTP {response.status_code} {response.text[:300]}")
-    rows = response.json()
-    return rows[0] if isinstance(rows, list) and rows else {**abonnement, **profils}
-
-
-def renouveler_abonnement_manuel(user_id: str, plan_nom: str, *, session_id: str | None = None) -> dict[str, Any]:
-    plan = lire_plan(plan_nom) or _plan_extra_defaut(plan_nom)
-    expiration = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)).isoformat(timespec="seconds")
-    profil_updates = {
-        "plan": normaliser_plan(plan_nom),
-        "quota_mensuel": int(plan.get("quota_mensuel") or 0),
-        "statut_abonnement": "actif",
-        "date_expiration_abonnement": expiration,
-        "date_dernier_renouvellement": now_iso(),
-    }
-    try:
-        maj_profil(user_id, profil_updates)
-    except RuntimeError:
-        pass
-    return activer_abonnement(user_id, plan_nom, int(plan.get("prix_fcfa") or 0), int(plan.get("quota_mensuel") or 0), session_id)
 
 
 if __name__ == "__main__":

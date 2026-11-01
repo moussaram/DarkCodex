@@ -58,7 +58,7 @@ class DeviceCodeTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(data["code"], "DARK-4829")
-        self.assertEqual(data["lien"], "https://darkcodex.onrender.com/device")
+        self.assertEqual(data["lien"], srv_device.DEVICE_PAGE_URL)
         self.assertEqual(data["expire_dans"], 600)
 
     def test_verify_passe_de_en_attente_a_confirme(self):
@@ -103,7 +103,7 @@ class DeviceCodeTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "confirme")
-        confirmer.assert_called_once_with("DARK-4829", "u1", "dkx_demo", None)
+        confirmer.assert_called_once_with("DARK-4829", "u1", "dkx_demo")
 
     def test_confirm_refuse_sans_token(self):
         payload = srv_main.DeviceConfirmIn(code="DARK-4829")
@@ -476,65 +476,26 @@ class WebhookRattrapageTests(unittest.TestCase):
 
 
 class SessionRefreshTests(unittest.TestCase):
-    """Problème 3 : renouvellement automatique de la session du terminal."""
+    """C4 : le terminal utilise UNIQUEMENT son jeton d'appareil dkx_."""
 
     ENV = {"SUPABASE_URL": "https://proj.supabase.co", "SUPABASE_SERVICE_KEY": "service-secret"}
 
-    def test_api_call_session_renouvelle_puis_rejoue(self):
-        session = {"token": "vieux", "refresh_token": "r1"}
-        reponses = [
-            (401, {"detail": "Token invalide."}),
-            (200, {"access_token": "neuf", "refresh_token": "r2", "expires_in": 3600}),
-            (200, {"tokens_solde": 42}),
-        ]
-        with mock.patch.object(cli, "api_call", side_effect=reponses) as appel, mock.patch.object(
-            cli, "save_auth"
-        ) as sauve:
-            status, data = cli.api_call_session(session, "/solde")
-        self.assertEqual(status, 200)
-        self.assertEqual(data["tokens_solde"], 42)
-        self.assertEqual(session["token"], "neuf")
-        self.assertEqual(session["refresh_token"], "r2")
-        self.assertEqual(appel.call_args_list[0].kwargs["token"], "vieux")
-        self.assertEqual(appel.call_args_list[2].kwargs["token"], "neuf")
-        sauve.assert_called_once()
-
-    def test_api_call_session_sans_refresh_un_seul_essai(self):
-        session = {"token": "vieux"}
-        with mock.patch.object(cli, "api_call", return_value=(401, {"detail": "x"})) as appel:
+    def test_api_call_session_ne_renouvelle_plus_rien(self):
+        """Un 401 est renvoyé tel quel : pas de /auth/refresh, pas de second appel."""
+        session = {"token": "dkx_vieux"}
+        with mock.patch.object(cli, "api_call", return_value=(401, {"detail": "Token invalide."})) as appel:
             status, _ = cli.api_call_session(session, "/solde")
         self.assertEqual(status, 401)
-        appel.assert_called_once()  # pas de boucle infinie : un seul essai
+        appel.assert_called_once()
+        self.assertEqual(appel.call_args.kwargs["token"], "dkx_vieux")
 
-    def test_api_call_session_refresh_refuse_renvoie_le_401(self):
-        session = {"token": "vieux", "refresh_token": "r1"}
-        reponses = [
-            (401, {"detail": "x"}),
-            (401, {"detail": "Session expirée."}),  # /auth/refresh refuse
-        ]
-        with mock.patch.object(cli, "api_call", side_effect=reponses) as appel:
-            status, _ = cli.api_call_session(session, "/solde")
-        self.assertEqual(status, 401)
-        self.assertEqual(appel.call_count, 2)  # essai initial + rafraîchissement raté
-        self.assertEqual(session["token"], "vieux")
+    def test_serveur_n_expose_plus_de_route_refresh(self):
+        routes = {route.path for route in srv_main.app.routes}
+        self.assertNotIn("/auth/refresh", routes)
+        self.assertFalse(hasattr(cli, "rafraichir_session"))
+        self.assertFalse(hasattr(srv_device, "rafraichir_session"))
 
-    def test_rafraichir_session_sans_refresh_token(self):
-        self.assertFalse(cli.rafraichir_session({"token": "t"}))
-
-    def test_auth_refresh_401_si_rafraichissement_refuse(self):
-        with mock.patch.object(srv_device, "rafraichir_session", return_value=None):
-            with self.assertRaises(srv_main.HTTPException) as ctx:
-                srv_main.auth_refresh(srv_main.RefreshIn(refresh_token="r1"))
-        self.assertEqual(ctx.exception.status_code, 401)
-
-    def test_auth_refresh_renvoie_les_deux_jetons(self):
-        nouvelle = {"access_token": "a2", "refresh_token": "r2", "expires_in": 3600}
-        with mock.patch.object(srv_device, "rafraichir_session", return_value=nouvelle) as raf:
-            data = srv_main.auth_refresh(srv_main.RefreshIn(refresh_token="r1"))
-        raf.assert_called_once_with("r1")
-        self.assertEqual((data["access_token"], data["refresh_token"]), ("a2", "r2"))
-
-    def test_verifier_code_renvoie_refresh_puis_code_supprime(self):
+    def test_verifier_code_ne_renvoie_plus_de_refresh_token(self):
         ligne = {
             "code": "DARK-ABCD-EFGH",
             "confirme": True,
@@ -542,7 +503,6 @@ class SessionRefreshTests(unittest.TestCase):
                 timespec="seconds"
             ),
             "token": "dkx_abc",
-            "refresh_token": "r1",
         }
         profil = {"user_id": "u1", "email": "a@b.c", "nom": "Awa", "tokens_solde": 5, "plan": "gratuit"}
         with mock.patch.object(srv_device, "_lire_code", return_value=ligne), mock.patch.object(
@@ -550,21 +510,13 @@ class SessionRefreshTests(unittest.TestCase):
         ), mock.patch.object(srv_device, "supprimer_code", return_value=True) as suppr:
             data = srv_device.verifier_code("DARK-ABCD-EFGH")
         self.assertEqual(data["status"], "confirme")
-        self.assertEqual(data["refresh_token"], "r1")
+        self.assertNotIn("refresh_token", data)
         suppr.assert_called_once_with("DARK-ABCD-EFGH")
         # usage unique : deuxième lecture du même code
         with mock.patch.object(srv_device, "_lire_code", return_value=None):
             self.assertEqual(srv_device.verifier_code("DARK-ABCD-EFGH")["status"], "expire")
 
-    def test_confirmer_code_stoque_le_refresh_token(self):
-        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
-            srv_device.requests, "patch"
-        ) as patch:
-            patch.return_value.ok = True
-            patch.return_value.json.return_value = [{"confirme": True}]
-            srv_device.confirmer_code("DARK-ABCD-EFGH", "u1", "dkx_abc", "r1")
-        self.assertEqual(patch.call_args.kwargs["json"]["refresh_token"], "r1")
-
+    def test_confirmer_code_n_ecrit_plus_de_refresh_token(self):
         with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
             srv_device.requests, "patch"
         ) as patch:
@@ -572,12 +524,15 @@ class SessionRefreshTests(unittest.TestCase):
             patch.return_value.json.return_value = [{"confirme": True}]
             srv_device.confirmer_code("DARK-ABCD-EFGH", "u1", "dkx_abc")
         self.assertNotIn("refresh_token", patch.call_args.kwargs["json"])
+        self.assertEqual(
+            patch.call_args.kwargs["json"], {"confirme": True, "user_id": "u1", "token": "dkx_abc"}
+        )
 
-    def test_device_html_envoie_refresh_token_et_oublie_sa_session(self):
+    def test_device_html_n_envoie_plus_de_refresh_token(self):
         html = (Path(__file__).resolve().parent.parent / "web" / "device.html").read_text(
             encoding="utf-8"
         )
-        self.assertIn("refresh_token: session.refresh_token", html)
+        self.assertNotIn("refresh_token", html)
         self.assertIn('signOut({ scope: "local" })', html)
         self.assertNotIn("signOut()", html)  # jamais le signOut global qui révoquerait le terminal
 
@@ -610,7 +565,7 @@ class CliLoginTests(unittest.TestCase):
 
     def test_premier_lancement_affiche_le_code_et_connecte(self):
         reponses = [
-            (200, {"code": "DARK-4829", "lien": "https://darkcodex.onrender.com/device", "expire_dans": 600}),
+            (200, {"code": "DARK-4829", "lien": srv_device.DEVICE_PAGE_URL, "expire_dans": 600}),
             (200, {"status": "en_attente"}),
             (
                 200,
@@ -631,7 +586,7 @@ class CliLoginTests(unittest.TestCase):
 
         self.assertIsNotNone(session)
         self.assertIn("🔐 Connexion à DarkCodex", output)
-        self.assertIn("→ https://darkcodex.onrender.com/device?code=DARK-4829", output)
+        self.assertIn(f"→ {srv_device.DEVICE_PAGE_URL}?code=DARK-4829", output)
         self.assertIn("Code affiché sur la page : DARK-4829", output)
         self.assertIn("⏳ En attente de confirmation...", output)
         self.assertIn("✅ Connexion réussie ! Bienvenue Moussa !", output)
@@ -644,7 +599,7 @@ class CliLoginTests(unittest.TestCase):
 
     def test_code_expire_affiche_le_message_impose(self):
         reponses = [
-            (200, {"code": "DARK-4829", "lien": "https://darkcodex.onrender.com/device", "expire_dans": 600}),
+            (200, {"code": "DARK-4829", "lien": srv_device.DEVICE_PAGE_URL, "expire_dans": 600}),
             (200, {"status": "expire"}),
         ]
         with mock.patch.object(cli, "api_call", side_effect=reponses), mock.patch.object(
@@ -710,7 +665,7 @@ class CliLoginTests(unittest.TestCase):
     def test_messages_imposes_solde_epuise_et_ligne_de_tokens(self):
         _, sortie = self._run(cli.show_exhausted)
         self.assertIn("⛔ Vos tokens gratuits sont épuisés !", sortie)
-        self.assertIn("→ https://darkcodex.onrender.com/abonnements", sortie)
+        self.assertIn(f"→ {cli.ABONNEMENTS_URL}", sortie)
         self.assertIn("⭐ Starter → 50 000 tokens = 500 FCFA", sortie)
         self.assertIn("🚀 Pro → 500 000 tokens = 2 500 FCFA", sortie)
 
@@ -816,6 +771,8 @@ class SupabaseRestTests(unittest.TestCase):
             post.return_value.ok = True
             srv_device.enregistrer_achat("u1", "starter", 50000, 500, "tx-1")
 
+        # Un SEUL appel, vers la table achats (plus d'écriture dans transactions).
+        self.assertEqual(post.call_count, 1)
         self.assertEqual(post.call_args.args[0], "https://proj.supabase.co/rest/v1/achats")
         self.assertEqual(
             post.call_args.kwargs["json"],

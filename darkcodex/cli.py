@@ -68,7 +68,7 @@ def ensure_dotenv() -> None:
     _DOTENV_CHARGE = True
 
 # API DarkCodex (device code, /chat, /solde, /verify-token).
-API_BASE = os.environ.get("DARKCODEX_API_BASE", "https://darkcodex.onrender.com").rstrip("/")
+API_BASE = os.environ.get("DARKCODEX_API_BASE", "https://darkcodex-technicien.onrender.com").rstrip("/")
 ABONNEMENTS_URL = f"{API_BASE}/abonnements"
 DEVICE_URL = f"{API_BASE}/device"
 LOGIN_POLL_SECONDS = 5
@@ -709,23 +709,6 @@ def session_info(token: str) -> tuple[int, dict]:
     return api_call("/verify-token", token=token)
 
 
-def rafraichir_session(session: dict) -> bool:
-    """Renouvelle le jeton avec le refresh_token. Renvoie True si réussi."""
-    refresh = session.get("refresh_token")
-    if not refresh:
-        return False
-    status, data = api_call(
-        "/auth/refresh", method="POST", payload={"refresh_token": refresh}, timeout=30
-    )
-    if status != 200 or not data.get("access_token"):
-        return False
-    session["token"] = data["access_token"]
-    if data.get("refresh_token"):
-        session["refresh_token"] = data["refresh_token"]  # Supabase le change à chaque fois
-    save_auth(session)
-    return True
-
-
 def api_call_session(
     session: dict,
     path: str,
@@ -733,15 +716,10 @@ def api_call_session(
     payload: dict | None = None,
     timeout: int = 60,
 ) -> tuple[int, dict]:
-    """Comme api_call, mais renouvelle la session une fois si le serveur répond 401."""
-    status, data = api_call(
-        path, method=method, payload=payload, token=session.get("token"), timeout=timeout
-    )
-    if status == 401 and rafraichir_session(session):
-        status, data = api_call(
-            path, method=method, payload=payload, token=session.get("token"), timeout=timeout
-        )
-    return status, data
+    """Appel serveur avec le jeton d'appareil de la session.
+    Un 401 signifie : jeton révoqué ou invalide -> l'utilisateur doit refaire /login.
+    """
+    return api_call(path, method=method, payload=payload, token=session.get("token"), timeout=timeout)
 
 
 def ensure_session(interactive: bool = True, announce: bool = True) -> dict | None:
@@ -849,7 +827,6 @@ def device_login() -> dict | None:
             if etat == "confirme":
                 session = {
                     "token": data.get("token", ""),
-                    "refresh_token": data.get("refresh_token", ""),
                     "email": data.get("email", ""),
                     "nom": data.get("nom", ""),
                     "tokens_solde": data.get("tokens_solde", 0),

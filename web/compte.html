@@ -4,41 +4,169 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mon compte — DarkCodex</title>
+  <meta name="description" content="Tableau de bord DarkCodex : solde de tokens, historique des achats et appareils connectés.">
   <link rel="stylesheet" href="/static/site.css">
   <script src="/static/nav.js" defer></script>
 </head>
 <body>
   <main>
     <h1>Mon compte</h1>
-    <div class="carte">
-      <p>Email : <strong id="email"></strong></p>
-      <p>Plan : <strong id="plan"></strong></p>
-      <p>Tokens restants : <strong id="solde"></strong> <span class="doux">(utilisés : <span id="utilises"></span>)</span></p>
-      <p><a class="bouton" href="/abonnements">Acheter des tokens</a> <button type="button" class="secondaire" id="btn-quitter">Se déconnecter du site</button></p>
-    </div>
     <div class="msg" id="msg"></div>
+
+    <section class="carte" aria-labelledby="t-compte">
+      <h2 id="t-compte">Compte</h2>
+      <p>Email : <strong id="email">—</strong></p>
+      <p>Nom : <strong id="nom">—</strong></p>
+      <p>Membre depuis : <strong id="inscrit">—</strong></p>
+      <p class="cache" id="ligne-code">Code de parrainage : <strong id="code"></strong></p>
+    </section>
+
+    <section class="carte" aria-labelledby="t-tokens">
+      <h2 id="t-tokens">Tokens</h2>
+      <div class="grille">
+        <div class="carte interne"><p class="prix" id="solde">—</p><p class="doux">restants</p></div>
+        <div class="carte interne"><p class="prix" id="utilises">—</p><p class="doux">consommés</p></div>
+        <div class="carte interne"><p class="prix" id="plan">—</p><p class="doux">plan actuel</p></div>
+      </div>
+      <p><a class="bouton" href="/abonnements">Acheter des tokens</a>
+         <button type="button" class="secondaire" id="btn-quitter">Se déconnecter du site</button></p>
+    </section>
+
+    <section class="carte" aria-labelledby="t-achats">
+      <h2 id="t-achats">Historique des achats</h2>
+      <div id="achats" class="doux"><p>Chargement…</p></div>
+    </section>
+
+    <section class="carte" aria-labelledby="t-appareils">
+      <h2 id="t-appareils">Appareils connectés</h2>
+      <p class="doux">Le terminal lié à ton compte apparaît ici. Révoquer un appareil force
+        sa reconnexion avec <code>/login</code>.</p>
+      <div id="appareils" class="doux"><p>Chargement…</p></div>
+    </section>
   </main>
+
   <script type="module">
     import { exigerConnexion, apiFetch, deconnexion } from "/static/auth.js";
 
     const $ = (id) => document.getElementById(id);
+    const nombre = (n) => Number(n || 0).toLocaleString("fr-FR");
+    const date = (v) => {
+      if (!v) return "—";
+      const d = new Date(v);
+      return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleDateString("fr-FR", { dateStyle: "long" });
+    };
 
-    const nombre = (n) => Number(n).toLocaleString("fr-FR");
+    function message(texte, type) { const m = $("msg"); m.textContent = texte; m.className = "msg " + type; }
+
+    function element(balise, texte, classe) {
+      const e = document.createElement(balise);
+      if (texte !== undefined) e.textContent = texte;
+      if (classe) e.className = classe;
+      return e;
+    }
+
+    const LIBELLE_STATUT = {
+      credite: "Payé",
+      en_attente: "En vérification",
+      anomalie: "À vérifier",
+      confirme: "Payé",
+    };
+
+    async function charger(chemin, cible, rendu) {
+      try {
+        const reponse = await apiFetch(chemin);
+        const data = await reponse.json().catch(() => ({}));
+        if (!reponse.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Erreur " + reponse.status);
+        const zone = $(cible);
+        zone.textContent = "";
+        rendu(data, zone);
+      } catch (erreur) {
+        const zone = $(cible);
+        zone.textContent = "";
+        zone.append(element("p", "Impossible de charger : " + (erreur.message || erreur), "ko"));
+      }
+    }
+
+    function rendreAchats(data, zone) {
+      const liste = Array.isArray(data.achats) ? data.achats : [];
+      if (!liste.length) { zone.append(element("p", "Aucun achat pour le moment.", "doux")); return; }
+      const table = element("table", undefined, "tableau");
+      const entete = element("tr");
+      ["Date", "Pack", "Tokens", "Montant", "Statut", "Référence"].forEach((t) => entete.append(element("th", t)));
+      table.append(element("thead", undefined, undefined).appendChild(entete).parentNode);
+      const corps = document.createElement("tbody");
+      for (const a of liste) {
+        const tr = document.createElement("tr");
+        tr.append(
+          element("td", date(a.date_achat)),
+          element("td", String(a.plan || "—")),
+          element("td", nombre(a.tokens_ajoutes)),
+          element("td", a.montant_fcfa ? nombre(a.montant_fcfa) + " FCFA" : "Gratuit"),
+          element("td", LIBELLE_STATUT[a.statut] || a.statut, "statut-" + (a.statut || "inconnu")),
+          element("td", a.reference || "—", "petit"),
+        );
+        corps.append(tr);
+      }
+      table.append(corps);
+      zone.append(table);
+    }
+
+    function rendreAppareils(data, zone) {
+      const liste = Array.isArray(data.appareils) ? data.appareils : [];
+      if (!liste.length) { zone.append(element("p", "Aucun appareil connecté.", "doux")); return; }
+      for (const a of liste) {
+        const ligne = document.createElement("p");
+        ligne.className = "ligne-appareil";
+        const infos = [
+          a.nom || "Terminal",
+          a.email,
+          a.cree_a ? "lié le " + date(a.cree_a) : "",
+          a.courant ? "cet appareil" : "",
+        ].filter(Boolean).join(" · ");
+        ligne.append(element("span", (a.revoque ? "⛔ " : "💻 ") + infos));
+        if (!a.revoque) {
+          const bouton = element("button", a.courant ? "Révoquer (moi)" : "Révoquer", "secondaire");
+          bouton.type = "button";
+          bouton.addEventListener("click", async () => {
+            bouton.disabled = true;
+            try {
+              const reponse = await apiFetch("/appareils/revoquer", {
+                method: "POST",
+                body: JSON.stringify({ id: a.id }),
+              });
+              const rep = await reponse.json().catch(() => ({}));
+              if (!reponse.ok) throw new Error(typeof rep.detail === "string" ? rep.detail : "Échec");
+              message("Appareil révoqué.", "ok");
+              await charger("/appareils", "appareils", rendreAppareils);
+            } catch (erreur) { message(erreur.message || String(erreur), "ko"); bouton.disabled = false; }
+          });
+          ligne.append(bouton);
+        }
+        zone.append(ligne);
+      }
+    }
 
     const session = await exigerConnexion();
 
     if (session) {
       $("email").textContent = session.user.email;
 
-      try {
-        const reponse = await apiFetch("/solde");
-        const data = await reponse.json();
-        if (!reponse.ok) throw new Error("solde");
-
-        $("plan").textContent = data.plan;
-        $("solde").textContent = nombre(data.tokens_solde);
-        $("utilises").textContent = nombre(data.tokens_utilises);
-      } catch (erreur) { const m = $("msg"); m.textContent = "Impossible de lire le solde."; m.className = "msg ko"; }
+      await Promise.all([
+        charger("/profil", "compte", (data, zone) => {
+          $("email").textContent = data.email || session.user.email;
+          $("nom").textContent = data.nom || "—";
+          $("inscrit").textContent = date(data.date_inscription);
+          $("solde").textContent = nombre(data.tokens_solde);
+          $("utilises").textContent = nombre(data.tokens_utilises);
+          $("plan").textContent = data.plan || "gratuit";
+          if (data.code_parrainage) {
+            $("code").textContent = data.code_parrainage;
+            $("ligne-code").classList.remove("cache");
+          }
+        }),
+        charger("/achats", "achats", rendreAchats),
+        charger("/appareils", "appareils", rendreAppareils),
+      ]);
 
       $("btn-quitter").addEventListener("click", async () => { await deconnexion(); location.replace("/connexion"); });
     }

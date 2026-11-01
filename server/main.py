@@ -72,7 +72,7 @@ app.add_middleware(
 )
 
 logger = logging.getLogger("darkcodex.server")
-DEVICE_PAGE = os.environ.get("DARKCODEX_DEVICE_URL", "https://darkcodex.onrender.com/device")
+DEVICE_PAGE = device.DEVICE_PAGE_URL
 
 # Délai entre deux rattrapages automatiques (0 = désactivé)
 RECONCILIATION_SECONDES = int(os.environ.get("DARKCODEX_RECONCILIATION_SECONDS", "600"))
@@ -81,11 +81,6 @@ RECONCILIATION_SECONDES = int(os.environ.get("DARKCODEX_RECONCILIATION_SECONDS",
 class DeviceConfirmIn(BaseModel):
     code: str
     token: str | None = None
-    refresh_token: str | None = None
-
-
-class RefreshIn(BaseModel):
-    refresh_token: str
 
 
 class ChatIn(BaseModel):
@@ -172,9 +167,7 @@ def device_confirm(payload: DeviceConfirmIn, authorization: str | None = Header(
         # Le terminal reçoit son PROPRE jeton longue durée, jamais le jeton du navigateur.
         jeton_appareil = device.creer_appareil(session["user_id"], session["email"], session["nom"])
         try:
-            ok = device.confirmer_code(
-                payload.code, session["user_id"], jeton_appareil, payload.refresh_token
-            )
+            ok = device.confirmer_code(payload.code, session["user_id"], jeton_appareil)
         except Exception:
             device.revoquer_appareil(jeton_appareil)
             raise
@@ -201,18 +194,6 @@ def logout(authorization: str | None = Header(None)) -> Any:
         return {"revoque": device.revoquer_appareil(token)}
     except Exception as exc:
         return _erreur(exc)
-
-
-@app.post("/auth/refresh")
-def auth_refresh(payload: RefreshIn) -> Any:
-    """Renouvelle la session Supabase du terminal (jeton d'accès ~1 h)."""
-    try:
-        nouvelle = device.rafraichir_session(payload.refresh_token)
-    except Exception as exc:  # noqa: BLE001
-        return _erreur(exc)
-    if not nouvelle:
-        raise HTTPException(status_code=401, detail="Session expirée. Reconnectez-vous avec /login.")
-    return nouvelle
 
 
 # ── 4. Vérifier le token au lancement ──────────────────────────
@@ -289,6 +270,91 @@ def solde(authorization: str | None = Header(None)) -> dict[str, Any]:
     }
 
 
+@app.get("/profil")
+def profil(authorization: str | None = Header(None)) -> dict[str, Any]:
+    """Informations du compte connecté (jamais celles d'un autre)."""
+    session = _utilisateur(authorization)
+    lignes = device.lire_profil(session["user_id"]) or {}
+    return {
+        "user_id": session["user_id"],
+        "email": str(lignes.get("email") or session["email"]),
+        "nom": str(lignes.get("nom") or session["nom"] or ""),
+        "plan": str(lignes.get("plan") or session["plan"]),
+        "tokens_solde": int(lignes.get("tokens_solde") or session["tokens_solde"] or 0),
+        "tokens_utilises": int(lignes.get("tokens_utilises") or session["tokens_utilises"] or 0),
+        "date_inscription": lignes.get("date_inscription"),
+        "code_parrainage": lignes.get("code_parrainage") or None,
+    }
+
+
+@app.get("/achats")
+def achats(authorization: str | None = Header(None)) -> Any:
+    """Historique des achats : montant, dates, statut et référence du paiement."""
+    session = _utilisateur(authorization)
+    user_id = session["user_id"]
+    try:
+        lignes = device.lister_achats(user_id)
+        paiements = device.paiements_de(user_id, limite=100)
+    except Exception as exc:
+        return _erreur(exc)
+    statuts = {str(p.get("session_id") or ""): p for p in paiements}
+    historique = []
+    for ligne in lignes:
+        reference = str(ligne.get("transaction_id") or "")
+        paiement = statuts.get(reference, {})
+        historique.append(
+            {
+                "plan": ligne.get("plan"),
+                "tokens_ajoutes": int(ligne.get("tokens_ajoutes") or 0),
+                "montant_fcfa": int(ligne.get("montant_fcfa") or 0),
+                "date_achat": ligne.get("date_achat"),
+                "reference": reference,
+                # Un achat inscrit n'est pas encore payé : on lit l'état RÉEL du paiement.
+                "statut": str(paiement.get("statut") or "en_attente"),
+                "date_paiement": paiement.get("credite_a") or paiement.get("cree_a"),
+            }
+        )
+    return {"achats": historique}
+
+
+@app.get("/appareils")
+def appareils(authorization: str | None = Header(None)) -> Any:
+    """Appareils connectés au compte (terminal inclus) — sans empreinte de jeton."""
+    session = _utilisateur(authorization)
+    try:
+        lignes = device.lister_appareils(session["user_id"])
+        courant = device.appareil_de_token(session["token"]) or {}
+    except Exception as exc:
+        return _erreur(exc)
+    id_courant = str(courant.get("id") or "")
+    return {
+        "appareils": [
+            {**ligne, "courant": str(ligne.get("id") or "") == id_courant}
+            for ligne in lignes
+        ]
+    }
+
+
+class AppareilRevoquerIn(BaseModel):
+    id: str
+
+
+@app.post("/appareils/revoquer")
+def appareil_revoquer(payload: AppareilRevoquerIn, authorization: str | None = Header(None)) -> Any:
+    """Révoque un appareil DU compte connecté (jamais celui d'autrui)."""
+    session = _utilisateur(authorization)
+    appareil_id = (payload.id or "").strip()
+    if not appareil_id:
+        raise HTTPException(status_code=400, detail="Identifiant d'appareil manquant.")
+    try:
+        revoque = device.revoquer_appareil_de(session["user_id"], appareil_id)
+    except Exception as exc:
+        return _erreur(exc)
+    if not revoque:
+        raise HTTPException(status_code=404, detail="Appareil introuvable.")
+    return {"revoque": True, "id": appareil_id}
+
+
 # ── 7. Paiements SasPay ────────────────────────────────────────
 #
 # Flux sûr : c'est LE SERVEUR qui fixe le montant (table plans) et qui lie la
@@ -321,7 +387,10 @@ def paiement_creer(payload: PaiementCreerIn, authorization: str | None = Header(
             description=f"DarkCodex - plan {plan['nom']}",
             email=email,
             nom=nom,
-            return_url=os.environ.get("SASPAY_RETURN_URL", "").strip(),
+            return_url=(
+                os.environ.get("SASPAY_RETURN_URL", "").strip()
+                or device.PUBLIC_URL + "/abonnements?retour=1"
+            ),
             metadata={"user_id": user_id, "plan": plan["nom"]},
         )
         device.creer_paiement(user_id, plan["nom"], tokens, prix, str(checkout["id"]))
@@ -520,9 +589,21 @@ def _servir_page(nom_fichier: str) -> HTMLResponse:
     if not page.exists():
         raise HTTPException(status_code=404, detail="Page introuvable.")
     html = page.read_text(encoding="utf-8")
-    # Menu et pied de page communs : ajoutés si la page ne les charge pas déjà.
+    # Menu, pied de page et style communs : ajoutés si la page ne les charge pas déjà.
     if "/static/nav.js" not in html:
         html = html.replace("</head>", '  <script src="/static/nav.js" defer></script>\n</head>', 1)
+    if "/static/site.css" not in html:
+        html = html.replace(
+            "</head>", '  <link rel="stylesheet" href="/static/site.css">\n</head>', 1
+        )
+    if "<footer" not in html:
+        html = html.replace(
+            "</body>",
+            '  <footer class="pied"><p>DarkCodex — assistant IA en terminal · '
+            '<a href="/abonnements">Tarifs</a> · <a href="/faq">FAQ</a> · '
+            '<a href="/legal">Mentions légales</a></p></footer>\n</body>',
+            1,
+        )
     return HTMLResponse(html)
 
 

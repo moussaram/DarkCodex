@@ -1,10 +1,28 @@
 // Fonctions communes à toutes les pages (connexion Supabase + appels à l'API DarkCodex).
 let clientPromise = null;
 
+function siteOrigin() {
+  return (window.location && window.location.origin) ? window.location.origin : "";
+}
+
+function erreurApiMessage(erreur) {
+  if (!erreur) return "Erreur inconnue.";
+  if (typeof erreur === "string") return erreur;
+  if (erreur.message) return erreur.message;
+  if (erreur.error && erreur.error.message) return erreur.error.message;
+  return String(erreur);
+}
+
 export async function config() {
   const reponse = await fetch("/config");
-  if (!reponse.ok) throw new Error("Configuration du site indisponible.");
-  return reponse.json();
+  if (!reponse.ok) {
+    throw new Error("Configuration du site indisponible. Vérifiez SUPABASE_URL et SUPABASE_ANON_KEY sur Render.");
+  }
+  const donnees = await reponse.json();
+  if (!donnees || !donnees.supabase_url || !donnees.supabase_anon_key) {
+    throw new Error("Réponse /config incomplète : clé Supabase publique absente.");
+  }
+  return donnees;
 }
 
 export function getSupabase() {
@@ -15,7 +33,11 @@ export function getSupabase() {
         config(),
       ]);
       return createClient(cfg.supabase_url, cfg.supabase_anon_key, {
-        auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+        },
       });
     })();
   }
@@ -24,7 +46,8 @@ export function getSupabase() {
 
 export async function getSession() {
   const supabase = await getSupabase();
-  const { data } = await supabase.auth.getSession();
+  const { data, error } = await supabase.auth.getSession();
+  if (error) throw error;
   return data.session;
 }
 
@@ -37,44 +60,60 @@ export function memoriserRetour(chemin) { localStorage.setItem("dk_retour", reto
 export function lireRetour() { return retourSur(localStorage.getItem("dk_retour") || "/compte"); }
 export function oublierRetour() { localStorage.removeItem("dk_retour"); }
 
-export async function connexionMotDePasse(email, motDePasse) {
-  const supabase = await getSupabase();
-  const { error } = await supabase.auth.signInWithPassword({ email, password: motDePasse });
-  if (error) throw error;
+function redirectionConnexion(retour) {
+  const url = new URL("/connexion", siteOrigin() || window.location.href);
+  if (retour) url.searchParams.set("retour", retourSur(retour));
+  return url.toString();
 }
 
-export async function inscription(email, motDePasse) {
+export async function connexionMotDePasse(email, motDePasse, retour = "/compte") {
   const supabase = await getSupabase();
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password: motDePasse });
+  if (error) throw error;
+  if (data && data.session) {
+    const cible = redirectionConnexion(retour);
+    if (window.location && window.location.href !== cible) {
+      window.location.assign(cible);
+    }
+  }
+}
+
+export async function inscription(email, motDePasse, retour = "/compte") {
+  const supabase = await getSupabase();
+  const redirectTo = redirectionConnexion(retour);
   const { data, error } = await supabase.auth.signUp({
     email,
     password: motDePasse,
-    options: { emailRedirectTo: location.origin + "/connexion" },
+    options: { emailRedirectTo: redirectTo },
   });
   if (error) throw error;
-  return { confirmationEmail: !data.session }; // true si Supabase exige de confirmer l'email
+  return { confirmationEmail: !data.session };
 }
 
-export async function connexionGoogle() {
+export async function connexionGoogle(retour = "/compte") {
   const supabase = await getSupabase();
+  const redirectTo = redirectionConnexion(retour);
   const { error } = await supabase.auth.signInWithOAuth({
     provider: "google",
-    options: { redirectTo: location.origin + "/connexion" },
+    options: { redirectTo },
   });
   if (error) throw error;
 }
 
-export async function lienMagique(email) {
+export async function lienMagique(email, retour = "/compte") {
   const supabase = await getSupabase();
+  const redirectTo = redirectionConnexion(retour);
   const { error } = await supabase.auth.signInWithOtp({
     email,
-    options: { emailRedirectTo: location.origin + "/connexion" },
+    options: { emailRedirectTo: redirectTo },
   });
   if (error) throw error;
 }
 
-export async function motDePasseOublie(email) {
+export async function motDePasseOublie(email, retour = "/compte") {
   const supabase = await getSupabase();
-  const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: location.origin + "/connexion" });
+  const redirectTo = redirectionConnexion(retour);
+  const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
   if (error) throw error;
 }
 
@@ -85,20 +124,37 @@ export async function deconnexion() {
 
 // Appel à l'API DarkCodex avec le jeton de la session en cours.
 export async function apiFetch(chemin, options = {}) {
-  const session = await getSession();
+  let session = null;
+  try {
+    session = await getSession();
+  } catch (erreur) {
+    session = null;
+  }
   if (!session) throw new Error("Vous n'êtes pas connecté.");
+
   const headers = { ...(options.headers || {}), Authorization: "Bearer " + session.access_token };
-  if (options.body) headers["Content-Type"] = "application/json";
-  return fetch(chemin, { ...options, headers });
+  if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  const reponse = await fetch(chemin, { ...options, headers });
+  if (reponse.status === 401) {
+    throw new Error("Session expirée. Veuillez vous reconnecter.");
+  }
+  return reponse;
 }
 
 // À appeler en haut d'une page privée : renvoie la session, ou redirige vers /connexion.
 export async function exigerConnexion() {
-  const session = await getSession();
+  let session = null;
+  try {
+    session = await getSession();
+  } catch (erreur) {
+    session = null;
+  }
   if (!session) {
     memoriserRetour(location.pathname + location.search);
-    location.replace("/connexion");
+    location.replace("/connexion?retour=" + encodeURIComponent(location.pathname + location.search));
     return null;
   }
   return session;
 }
+
+export { erreurApiMessage };
